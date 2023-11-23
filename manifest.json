@@ -10,9 +10,5 @@
   "integration_type": "device",
   "iot_class": "local_polling",
   "requirements": [],
-  "dhcp": [
-    {
-      "macaddress": "34AB95*"
-    }
-  ]
+  "version": "0.1.0"
 }
