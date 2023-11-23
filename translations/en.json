@@ -1,0 +1,67 @@
+{
+    "config": {
+        "abort": {
+            "no_devices_found": "No devices found on the network",
+            "single_instance_allowed": "Already configured. Only a single configuration possible."
+        },
+        "step": {
+            "user": {
+                "data": {
+                    "host": "Host/IP Address",
+                    "nickname": "Smoker Nickname"
+                },
+                "description": "Add your host and nickname here",
+                "title": "Add Smoker"
+            }
+        }
+    },
+    "device_automation": {
+        "action_type": {
+            "turn_off": "Turn off {entity_name}",
+            "turn_on": "Turn on {entity_name}"
+        }
+    },
+    "entity": {
+        "binary_sensor": {
+            "error_state": {
+                "name": "Error Status"
+            },
+            "fan_state": {
+                "name": "Fan Status"
+            },
+            "igniter_state": {
+                "name": "Igniter Status"
+            },
+            "primer_state": {
+                "name": "Primer Status"
+            }
+        },
+        "climate": {
+            "grill_control": {
+                "name": "Grill Control"
+            },
+            "probe1_control": {
+                "name": "Probe1 Control"
+            }
+        },
+        "sensor": {
+            "error_details": {
+                "name": "Error Information"
+            },
+            "p1_act_temp": {
+                "name": "Probe 1 Temperature"
+            },
+            "p1_target_temp": {
+                "name": "Probe 1 Target Temperature"
+            },
+            "p2_act_temp": {
+                "name": "Probe 2 Temperature"
+            }
+        },
+        "switch": {
+            "primer": {
+                "name": "Primer"
+            }
+        }
+    }
+}

@@ -1,0 +1,67 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Smoker",
+        "description": "Add your host and nickname here",
+        "data": {
+          "host": "Host/IP Address",
+          "nickname": "Smoker Nickname"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "[%key:common::config_flow::abort::single_instance_allowed%]",
+      "no_devices_found": "[%key:common::config_flow::abort::no_devices_found%]"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "p1_target_temp": {
+        "name": "Probe 1 Target Temperature"
+      },
+      "p1_act_temp": {
+        "name": "Probe 1 Temperature"
+      },
+      "p2_act_temp": {
+        "name": "Probe 2 Temperature"
+      },
+      "error_details": {
+        "name": "Error Information"
+      }
+    },
+    "binary_sensor": {
+      "primer_state": {
+        "name": "Primer Status"
+      },
+      "fan_state": {
+        "name": "Fan Status"
+      },
+      "igniter_state": {
+        "name": "Igniter Status"
+      },
+      "error_state": {
+        "name": "Error Status"
+      }
+    },
+    "switch": {
+      "primer": {
+        "name": "Primer"
+      }
+    },
+    "climate": {
+      "grill_control": {
+        "name": "Grill Control"
+      },
+      "probe1_control": {
+        "name": "Probe1 Control"
+      }
+    }
+  },
+  "device_automation": {
+    "action_type": {
+      "turn_on": "Turn on {entity_name}",
+      "turn_off": "Turn off {entity_name}"
+    }
+  }
+}
