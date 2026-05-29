@@ -219,7 +219,7 @@ class PitbossConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 device_info = await _async_validate_input(
                     self.hass, _entry_data_from_user_input(user_input)
                 )
-            except ClientError, asyncio.TimeoutError:
+            except (ClientError, asyncio.TimeoutError):
                 errors["base"] = "cannot_connect"
             except UnsupportedModel as err:
                 errors["base"] = "unsupported_model"
@@ -311,7 +311,7 @@ class PitbossConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 device_info = await _async_validate_input(
                     self.hass, _entry_data_from_user_input(user_input)
                 )
-            except ClientError, asyncio.TimeoutError:
+            except (ClientError, asyncio.TimeoutError):
                 errors["base"] = "cannot_connect"
             except UnsupportedModel as err:
                 errors["base"] = "unsupported_model"
