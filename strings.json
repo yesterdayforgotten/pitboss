@@ -2,35 +2,175 @@
   "config": {
     "step": {
       "user": {
-        "title": "Add Smoker",
-        "description": "Add your host and nickname here",
+        "menu_options": {
+          "discover": "Discover on local network",
+          "manual": "Enter host manually"
+        }
+      },
+      "discover": {
+        "title": "Select Smoker",
+        "description": "Choose one supported smoker found on your local network.",
         "data": {
-          "host": "Host/IP Address",
-          "nickname": "Smoker Nickname"
+          "host": "Supported smoker"
+        }
+      },
+      "discover_subnet": {
+        "title": "Scan Custom Subnet",
+        "description": "No supported smokers were found on the detected local networks. If Home Assistant is running in Docker, a devcontainer, or a VM, enter the LAN subnet to scan, for example `192.168.0.0/24`.",
+        "data": {
+          "subnet": "Subnet"
+        }
+      },
+      "manual": {
+        "title": "Add Smoker",
+        "description": "Add your host here",
+        "data": {
+          "host": "Host/IP Address"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Smoker",
+        "description": "Update the host address if your smoker's IP has changed",
+        "data": {
+          "host": "Host/IP Address"
         }
       }
     },
     "abort": {
       "single_instance_allowed": "[%key:common::config_flow::abort::single_instance_allowed%]",
-      "no_devices_found": "[%key:common::config_flow::abort::no_devices_found%]"
+      "no_devices_found": "[%key:common::config_flow::abort::no_devices_found%]",
+      "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]"
+    },
+    "error": {
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_subnet": "Enter a valid IPv4 subnet in CIDR notation.",
+      "no_devices_found": "No supported smokers were found in that subnet.",
+      "subnet_too_large": "Subnet scan must be limited to 256 addresses or fewer.",
+      "unsupported_model": "This smoker model is not supported: {model}.",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Pit Boss Options",
+        "data": {
+          "scan_interval": "Polling interval (seconds)"
+        }
+      }
+    }
+  },
+  "issues": {
+    "rename_entity_ids": {
+      "title": "Entity IDs can be updated after the device rename",
+      "description": "The Pit Boss device was renamed from **{old_name}** to **{new_name}**. Pit Boss can rename **{entity_count}** auto-generated entity IDs that still follow the older device-name pattern.",
+      "fix_flow": {
+        "error": {
+          "rename_conflict": "Some entity IDs could not be renamed because their new IDs are already in use. Resolve the conflicting IDs and try again."
+        },
+        "step": {
+          "confirm": {
+            "title": "Rename entity IDs to match {new_name}",
+            "description": "The Pit Boss device was renamed from **{old_name}** to **{new_name}**. Submitting this repair will rename **{entity_count}** matching auto-generated entity IDs so they follow the current device name. This may require updating any dashboards, automations, or scripts that still reference the older entity IDs."
+          }
+        }
+      }
     }
   },
   "entity": {
     "sensor": {
-      "p1_target_temp": {
-        "name": "Probe 1 Target Temperature"
-      },
       "p1_act_temp": {
         "name": "Probe 1 Temperature"
       },
       "p2_act_temp": {
         "name": "Probe 2 Temperature"
       },
+      "p1_temp_delta": {
+        "name": "Probe 1 Delta to Target"
+      },
+      "p2_temp_delta": {
+        "name": "Probe 2 Delta to Target"
+      },
+      "p1_temp_rate": {
+        "name": "Probe 1 Temperature Rate"
+      },
+      "p2_temp_rate": {
+        "name": "Probe 2 Temperature Rate"
+      },
+      "smoker_temp_rate": {
+        "name": "Smoker Temperature Rate"
+      },
+      "uptime": {
+        "name": "Uptime"
+      },
+      "ram_size": {
+        "name": "RAM Size"
+      },
+      "ram_free": {
+        "name": "RAM Free"
+      },
+      "ram_min_free": {
+        "name": "RAM Minimum Free"
+      },
+      "fw_version": {
+        "name": "Firmware Version"
+      },
+      "fw_id": {
+        "name": "Firmware ID"
+      },
+      "mg_version": {
+        "name": "Controller Version"
+      },
+      "mg_id": {
+        "name": "Controller ID"
+      },
+      "fs_size": {
+        "name": "Filesystem Size"
+      },
+      "fs_free": {
+        "name": "Filesystem Free"
+      },
+      "wifi_sta_ip": {
+        "name": "Wi-Fi Station IP"
+      },
+      "wifi_ap_ip": {
+        "name": "Wi-Fi Access Point IP"
+      },
+      "wifi_status": {
+        "name": "Wi-Fi Status"
+      },
+      "wifi_ssid": {
+        "name": "Wi-Fi SSID"
+      },
+      "current_cook_duration": {
+        "name": "Current Cook Duration"
+      },
+      "last_cook_duration": {
+        "name": "Last Cook Duration"
+      },
+      "last_cook_start": {
+        "name": "Last Cook Start"
+      },
+      "last_cook_end": {
+        "name": "Last Cook End"
+      },
+      "p1_time_since_target_reached": {
+        "name": "Probe 1 Time Since Done"
+      },
+      "p2_time_since_target_reached": {
+        "name": "Probe 2 Time Since Done"
+      },
+      "last_successful_update": {
+        "name": "Last Successful Update"
+      },
       "error_details": {
         "name": "Error Information"
       }
     },
     "binary_sensor": {
+      "cook_active": {
+        "name": "Cook Active"
+      },
       "primer_state": {
         "name": "Primer Status"
       },
@@ -39,6 +179,18 @@
       },
       "igniter_state": {
         "name": "Igniter Status"
+      },
+      "p1_done": {
+        "name": "Probe 1 Done"
+      },
+      "p2_done": {
+        "name": "Probe 2 Done"
+      },
+      "p1_stall": {
+        "name": "Probe 1 Stall"
+      },
+      "p2_stall": {
+        "name": "Probe 2 Stall"
       },
       "error_state": {
         "name": "Error Status"
@@ -49,12 +201,17 @@
         "name": "Primer"
       }
     },
+    "number": {
+      "probe1_target_temp": {
+        "name": "Probe 1 Target Temperature"
+      },
+      "probe2_target_temp": {
+        "name": "Probe 2 Target Temperature"
+      }
+    },
     "climate": {
       "grill_control": {
         "name": "Grill Control"
-      },
-      "probe1_control": {
-        "name": "Probe1 Control"
       }
     }
   },

@@ -1,16 +1,32 @@
 """Entity representing a Pitboss smoker."""
 
+from collections.abc import Awaitable, Callable
+import logging
+from typing import Any
+
+from aiohttp import ClientError
+
+from homeassistant.const import CONF_HOST
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
+from homeassistant.helpers.entity import EntityDescription
+from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.typing import UNDEFINED, UndefinedType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import (
+    DATA_DEVICE_INFO,
+    DEFAULT_NAME,
+    DOMAIN,
+    INFO_FW_VERSION,
+    INFO_MAC,
+    INFO_MG_VERSION,
+    INFO_MODEL_ID,
+)
+from .coordinator import PitbossDataUpdateCoordinator
 from .pitboss_api import PitbossApi
 
-from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.entity import EntityDescription
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.core import callback
-
-from .const import DOMAIN
-from .coordinator import PitbossDataUpdateCoordinator
-
-ENTITY_ID_FORMAT = DOMAIN + ".{}"
+_LOGGER = logging.getLogger(__name__)
 
 
 class PitbossEntity(CoordinatorEntity[PitbossDataUpdateCoordinator]):
@@ -25,40 +41,127 @@ class PitbossEntity(CoordinatorEntity[PitbossDataUpdateCoordinator]):
         description: EntityDescription,
     ) -> None:
         """Initialize the base device entity."""
-        super().__init__(coordinator)
         self.entity_description = description
+        super().__init__(coordinator)
+        device_info = coordinator.config_entry.data.get(DATA_DEVICE_INFO, {})
+        host = coordinator.config_entry.data.get(CONF_HOST)
+        registry_device_id = device_info.get(INFO_MAC) or device_id
+        connections = None
+        if mac_address := device_info.get(INFO_MAC):
+            connections = {(CONNECTION_NETWORK_MAC, mac_address)}
         self._attr_unique_id = f"{device_id}_{description.key}"
-        # self.entity_id = async_generate_entity_id(
-        #    ENTITY_ID_FORMAT, f"{device_id}_{description.key}", hass=coordinator.hass
-        # )
-        # self._attr_name = {description.key}
-        # self.entity_id = f"sensor.{device_id}_{description.key}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, registry_device_id)},
+            connections=connections,
+            manufacturer="Pit Boss",
+            model=device_info.get(INFO_MODEL_ID),
+            model_id=device_info.get(INFO_MODEL_ID),
+            serial_number=device_info.get(INFO_MAC),
+            sw_version=device_info.get(INFO_FW_VERSION),
+            hw_version=device_info.get(INFO_MG_VERSION),
+            configuration_url=None if host is None else f"http://{host}",
+        )
 
-        # self._device_id = device_id
-        self._update_attr()
+    def _device_name_for_entity_id(self) -> str:
+        """Return the device name to use for entity ids."""
 
-    @callback
-    def _update_attr(self) -> None:
-        """Update the state and attributes."""
+        if (device := getattr(self, "device_entry", None)) is not None:
+            return (
+                device.name_by_user
+                or device.name
+                or self.coordinator.config_entry.title
+                or DEFAULT_NAME
+            )
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Handle updated data from the coordinator."""
-        self._update_attr()
-        self.async_write_ha_state()
+        return self.coordinator.config_entry.title or DEFAULT_NAME
 
     @property
-    def device_info(self) -> DeviceInfo:
-        """Return device information about this Pitboss smoker."""
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._api.GetUniqueID())},
-            manufacturer="Pitboss",
-            # model=self._api.get_model(),
-            name=self.coordinator.nickname,
-            # sw_version=self._api.get_firmware_version(),
-        )
+    def internal_integration_suggested_object_id(self) -> str | None:
+        """Return a device-name-based object id without area prefixes."""
+
+        name = self.name
+        if name in (None, UNDEFINED):
+            return None
+
+        if isinstance(name, UndefinedType):
+            return None
+
+        return f"{self._device_name_for_entity_id()} {name}"
 
     @property
     def _api(self) -> PitbossApi:
         """Return to api from coordinator."""
         return self.coordinator.api
+
+    async def _async_perform_api_command(
+        self,
+        action: str,
+        command: Callable[..., Awaitable[None]],
+        *args: Any,
+    ) -> None:
+        """Run one API command under the shared write lock."""
+
+        try:
+            await self.coordinator.async_run_serialized_command(lambda: command(*args))
+        except (ClientError, TimeoutError) as ex:
+            raise HomeAssistantError(
+                f"Failed to {action}: the Pit Boss device is unreachable"
+            ) from ex
+        except ValueError as ex:
+            raise HomeAssistantError(
+                f"Failed to {action}: the Pit Boss device returned invalid data"
+            ) from ex
+
+    def _handle_successful_command(self) -> None:
+        """Reset polling and schedule a delayed confirmation refresh."""
+
+        self.coordinator.reset_update_interval()
+
+        async def _request_refresh(_now) -> None:
+            await self.coordinator.async_request_refresh()
+
+        async_call_later(
+            self.hass,
+            3,
+            _request_refresh,
+        )
+
+    async def _async_run_debounced_api_command(
+        self,
+        action: str,
+        command: Callable[..., Awaitable[None]],
+        *args: Any,
+    ) -> None:
+        """Execute a debounced API command and log failures."""
+
+        try:
+            await self._async_perform_api_command(action, command, *args)
+        except HomeAssistantError as ex:
+            _LOGGER.warning("%s", ex)
+            await self.coordinator.async_request_refresh()
+            return
+
+        self._handle_successful_command()
+
+    async def _async_execute_api_command(
+        self,
+        action: str,
+        command: Callable[..., Awaitable[None]],
+        *args: Any,
+        debounce_key: str | None = None,
+        debounce_delay: float = 0,
+    ) -> None:
+        """Execute an API command and convert low-level errors to user-facing ones."""
+
+        if debounce_key is not None:
+            self.coordinator.reset_update_interval()
+            self.coordinator.async_schedule_debounced_command(
+                debounce_key,
+                debounce_delay,
+                lambda: self._async_run_debounced_api_command(action, command, *args),
+            )
+            return
+
+        await self.coordinator.async_flush_debounced_commands()
+        await self._async_perform_api_command(action, command, *args)
+        self._handle_successful_command()

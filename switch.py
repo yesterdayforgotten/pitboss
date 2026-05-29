@@ -1,41 +1,34 @@
-"""Support for monitoring Pitboss sensors."""
-from __future__ import annotations
+"""Support for Pitboss switches."""
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
 
-from .pitboss_api import PitbossApi
-from homeassistant.components.switch import (
-    SwitchDeviceClass,
-    SwitchEntity,
-    SwitchEntityDescription
-)
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import StateType
 
-from .const import DOMAIN
+from . import PitbossConfigEntry
 from .entity import PitbossEntity
+from .pitboss_api import PitbossApi
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class PitbossSwitchEntityMixin:
     """Mixin for Pitboss switch."""
 
-    is_on_fn: Callable[[PitbossApi, str], StateType | datetime]
-    turn_on_fn: Callable[[PitbossApi, str], StateType | datetime]
-    turn_off_fn: Callable[[PitbossApi, str], StateType | datetime]
+    is_on_fn: Callable[[PitbossApi, str], bool]
+    turn_on_fn: Callable[[PitbossApi, str], Awaitable[None]]
+    turn_off_fn: Callable[[PitbossApi, str], Awaitable[None]]
 
 
-@dataclass
-class PitbossSwitchEntityDescription(
-    SwitchEntityDescription, PitbossSwitchEntityMixin
-):
+@dataclass(frozen=True, kw_only=True)
+class PitbossSwitchEntityDescription(SwitchEntityDescription, PitbossSwitchEntityMixin):
     """Describes a Pitboss switch."""
 
     available_fn: Callable[[PitbossApi, str], bool] = lambda api, _: True
+    optimistic_on_state: dict = field(default_factory=dict)
+    optimistic_off_state: dict = field(default_factory=dict)
 
 
 SWITCHES: tuple[PitbossSwitchEntityDescription, ...] = (
@@ -43,23 +36,26 @@ SWITCHES: tuple[PitbossSwitchEntityDescription, ...] = (
         key="primer",
         translation_key="primer",
         icon="mdi:motion",
-        is_on_fn=lambda api,    _: api.GetStateValue('Priming'),
-        turn_on_fn=lambda api,  _: api.SetPrimeState(True),
-        turn_off_fn=lambda api, _: api.SetPrimeState(False),
+        is_on_fn=lambda api, _: api.get_state_value("Priming"),
+        turn_on_fn=lambda api, _: api.set_prime_state(True),
+        turn_off_fn=lambda api, _: api.set_prime_state(False),
+        optimistic_on_state={"Priming": True},
+        optimistic_off_state={"Priming": False},
     ),
 )
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
+    config_entry: PitbossConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the available Pitboss switches."""
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    coordinator = config_entry.runtime_data
+    device_id = config_entry.unique_id or config_entry.entry_id
 
     async_add_entities(
-        PitbossSwitch(coordinator, config_entry.unique_id, description) for description in SWITCHES
+        PitbossSwitch(coordinator, device_id, description) for description in SWITCHES
     )
 
 
@@ -78,14 +74,34 @@ class PitbossSwitch(PitbossEntity, SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Return the sensor state."""
-        return self.entity_description.is_on_fn(self._api, self.entity_description.key)
+        return bool(
+            self.entity_description.is_on_fn(self._api, self.entity_description.key)
+        )
 
-    def async_turn_off(self, **kwargs: Any) -> None:
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch."""
-        self.entity_description.turn_off_fn(
-            self._api, self.entity_description.key)
+        await self._async_execute_api_command(
+            f"turn off {self.entity_description.key}",
+            self.entity_description.turn_off_fn,
+            self._api,
+            self.entity_description.key,
+        )
+        if self.entity_description.optimistic_off_state:
+            self._api.apply_optimistic_state(
+                self.entity_description.optimistic_off_state
+            )
+            self.async_write_ha_state()
 
-    def async_turn_on(self, **kwargs: Any) -> None:
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the switch."""
-        self.entity_description.turn_on_fn(
-            self._api, self.entity_description.key)
+        await self._async_execute_api_command(
+            f"turn on {self.entity_description.key}",
+            self.entity_description.turn_on_fn,
+            self._api,
+            self.entity_description.key,
+        )
+        if self.entity_description.optimistic_on_state:
+            self._api.apply_optimistic_state(
+                self.entity_description.optimistic_on_state
+            )
+            self.async_write_ha_state()
