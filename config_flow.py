@@ -38,6 +38,7 @@ from .pitboss_api import PitbossApi
 _LOGGER = logging.getLogger(__name__)
 
 CONF_SUBNET = "subnet"
+DEFAULT_DISCOVERY_SUBNET = "192.168.0.0/24"
 MAX_DISCOVERY_HOSTS = 256
 
 STEP_MANUAL_DATA_SCHEMA = vol.Schema(
@@ -48,7 +49,7 @@ STEP_MANUAL_DATA_SCHEMA = vol.Schema(
 
 STEP_DISCOVER_SUBNET_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_SUBNET): str,
+        vol.Required(CONF_SUBNET, default=DEFAULT_DISCOVERY_SUBNET): str,
     }
 )
 
@@ -62,6 +63,12 @@ def _entry_data_from_user_input(
     if device_info is not None:
         data[DATA_DEVICE_INFO] = device_info
     return data
+
+
+def _entry_title_from_device_info(device_info: dict[str, Any]) -> str:
+    """Return the config entry title from device info."""
+
+    return f"{DEFAULT_NAME} {device_info[INFO_MODEL_ID].upper()}"
 
 
 def _discovery_option_label(device_info: dict[str, Any]) -> str:
@@ -112,6 +119,29 @@ async def _async_validate_input(
         raise UnsupportedModel(model)
 
     return device_info
+
+
+def _set_validate_input_error(
+    err: Exception,
+    errors: dict[str, str],
+    description_placeholders: dict[str, str],
+) -> None:
+    """Map validation errors to Home Assistant config flow error keys."""
+    if isinstance(err, (ClientError, asyncio.TimeoutError)):
+        errors["base"] = "cannot_connect"
+        return
+
+    if isinstance(err, UnsupportedModel):
+        errors["base"] = "unsupported_model"
+        description_placeholders["model"] = err.model
+        return
+
+    if isinstance(err, InvalidResponse):
+        errors["base"] = "unknown"
+        return
+
+    _LOGGER.exception("An unknown error has occurred")
+    errors["base"] = "unknown"
 
 
 async def _async_probe_discovery_host(
@@ -219,23 +249,20 @@ class PitbossConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 device_info = await _async_validate_input(
                     self.hass, _entry_data_from_user_input(user_input)
                 )
-            except (ClientError, asyncio.TimeoutError):
-                errors["base"] = "cannot_connect"
-            except UnsupportedModel as err:
-                errors["base"] = "unsupported_model"
-                description_placeholders["model"] = err.model
-            except InvalidResponse:
-                errors["base"] = "unknown"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("An unknown error has occurred")
-                errors["base"] = "unknown"
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # pylint: disable=broad-except
+                _set_validate_input_error(err, errors, description_placeholders)
             else:
                 entry_data = _entry_data_from_user_input(user_input, device_info)
                 unique_id = device_info[INFO_MAC]
                 await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
                 self._async_abort_entries_match({CONF_HOST: entry_data[CONF_HOST]})
-                return self.async_create_entry(title=DEFAULT_NAME, data=entry_data)
+                return self.async_create_entry(
+                    title=_entry_title_from_device_info(device_info),
+                    data=entry_data,
+                )
 
         return self.async_show_form(
             step_id="manual",
@@ -264,7 +291,10 @@ class PitbossConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(device_info[INFO_MAC])
             self._abort_if_unique_id_configured()
             self._async_abort_entries_match({CONF_HOST: selected_host})
-            return self.async_create_entry(title=DEFAULT_NAME, data=entry_data)
+            return self.async_create_entry(
+                title=_entry_title_from_device_info(device_info),
+                data=entry_data,
+            )
 
         return self.async_show_form(
             step_id="discover",
@@ -311,16 +341,10 @@ class PitbossConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 device_info = await _async_validate_input(
                     self.hass, _entry_data_from_user_input(user_input)
                 )
-            except (ClientError, asyncio.TimeoutError):
-                errors["base"] = "cannot_connect"
-            except UnsupportedModel as err:
-                errors["base"] = "unsupported_model"
-                description_placeholders["model"] = err.model
-            except InvalidResponse:
-                errors["base"] = "unknown"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("An unknown error has occurred")
-                errors["base"] = "unknown"
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # pylint: disable=broad-except
+                _set_validate_input_error(err, errors, description_placeholders)
             else:
                 return self.async_update_reload_and_abort(
                     reconfigure_entry,

@@ -11,7 +11,7 @@ from .const import DOMAIN
 
 PANEL_STATIC_URL = "/pitboss_static"
 PANEL_MODULE_NAME = "pitboss-cook-panel"
-PANEL_MODULE_URL = f"{PANEL_STATIC_URL}/pitboss-panel.js?v=7"
+PANEL_MODULE_URL = f"{PANEL_STATIC_URL}/pitboss-panel.js"
 
 
 def _panel_asset_path() -> str:
@@ -34,18 +34,19 @@ def get_panel_sidebar_title(config_entry: ConfigEntry) -> str:
     return f"{config_entry.title} Cooks"
 
 
+async def async_setup_panel_static(hass: HomeAssistant) -> None:
+    """Register static panel assets once for the Pit Boss integration."""
+
+    if hass.http is None:
+        return
+
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(PANEL_STATIC_URL, _panel_asset_path(), cache_headers=False)]
+    )
+
+
 async def async_register_panel(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
     """Register the cook archive panel for one Pit Boss config entry."""
-
-    if not hass.data[DOMAIN]["panel_static_setup"]:
-        await hass.http.async_register_static_paths(
-            [
-                StaticPathConfig(
-                    PANEL_STATIC_URL, _panel_asset_path(), cache_headers=False
-                )
-            ]
-        )
-        hass.data[DOMAIN]["panel_static_setup"] = True
 
     frontend_url_path = get_panel_url_path(config_entry)
     if frontend.async_panel_exists(hass, frontend_url_path):

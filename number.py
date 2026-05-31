@@ -8,25 +8,40 @@ from homeassistant.components.number import (
 from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from . import PitbossConfigEntry
 from .const import TEMPERATURE_COMMAND_DEBOUNCE
 from .entity import PitbossEntity
 
+_PROBE_TARGET_MIN_F = 130
+_PROBE_TARGET_MAX_F = 400
 
-class PitbossProbeTargetNumber(PitbossEntity, NumberEntity):
-    """Writable probe target temperature setpoint."""
 
-    entity_description: NumberEntityDescription
+def _probe_target_limit_in_native_unit(is_fahrenheit: bool, value_f: int) -> float:
+    """Return a probe target limit in the active temperature unit."""
+    if is_fahrenheit:
+        return float(value_f)
 
-    _attr_icon = "mdi:thermometer-lines"
-    _attr_native_step = 1
-    _attr_entity_category = EntityCategory.CONFIG
+    return TemperatureConverter.convert(
+        value_f,
+        UnitOfTemperature.FAHRENHEIT,
+        UnitOfTemperature.CELSIUS,
+    )
+
+
+class _PitbossTemperatureUnitMixin:
+    """Shared temperature unit and bounds behavior for Pit Boss number entities."""
+
+    @property
+    def _is_fahrenheit(self) -> bool:
+        """Return True when the smoker reports Fahrenheit mode."""
+        return self._api.is_fahrenheit()
 
     @property
     def native_unit_of_measurement(self) -> str:
         """Return the unit of measurement."""
-        if not self._api.get_state_value("IsFarenheit"):
+        if not self._is_fahrenheit:
             return UnitOfTemperature.CELSIUS
 
         return UnitOfTemperature.FAHRENHEIT
@@ -34,16 +49,28 @@ class PitbossProbeTargetNumber(PitbossEntity, NumberEntity):
     @property
     def native_min_value(self) -> float:
         """Return the minimum value."""
-        if self.native_unit_of_measurement == UnitOfTemperature.CELSIUS:
-            return 0  # 0°C is ~32°F, probe range starts well above
-        return 0
+        return _probe_target_limit_in_native_unit(
+            self._is_fahrenheit, _PROBE_TARGET_MIN_F
+        )
 
     @property
     def native_max_value(self) -> float:
         """Return the maximum value."""
-        if self.native_unit_of_measurement == UnitOfTemperature.CELSIUS:
-            return 204  # 400°F in Celsius
-        return 400
+        return _probe_target_limit_in_native_unit(
+            self._is_fahrenheit, _PROBE_TARGET_MAX_F
+        )
+
+
+class PitbossProbeTargetNumber(
+    _PitbossTemperatureUnitMixin, PitbossEntity, NumberEntity
+):
+    """Writable probe target temperature setpoint."""
+
+    entity_description: NumberEntityDescription
+
+    _attr_icon = "mdi:thermometer-lines"
+    _attr_native_step = 10
+    _attr_entity_category = EntityCategory.CONFIG
 
     @property
     def native_value(self) -> float:
@@ -63,13 +90,15 @@ class PitbossProbeTargetNumber(PitbossEntity, NumberEntity):
         )
 
 
-class PitbossVirtualProbeTargetNumber(PitbossEntity, RestoreNumber):
+class PitbossVirtualProbeTargetNumber(
+    _PitbossTemperatureUnitMixin, PitbossEntity, RestoreNumber
+):
     """Local-only target temperature setpoint for Probe 2."""
 
     entity_description: NumberEntityDescription
 
     _attr_icon = "mdi:thermometer-lines"
-    _attr_native_step = 1
+    _attr_native_step = 10
     _attr_entity_category = EntityCategory.CONFIG
     _attr_should_poll = False
     _target_key = "P2SetTemp"
@@ -79,28 +108,6 @@ class PitbossVirtualProbeTargetNumber(PitbossEntity, RestoreNumber):
     def available(self) -> bool:
         """Keep the local target editable even if the smoker is offline."""
         return True
-
-    @property
-    def native_unit_of_measurement(self) -> str:
-        """Return the unit of measurement."""
-        if not self._api.get_state_value("IsFarenheit"):
-            return UnitOfTemperature.CELSIUS
-
-        return UnitOfTemperature.FAHRENHEIT
-
-    @property
-    def native_min_value(self) -> float:
-        """Return the minimum value."""
-        if self.native_unit_of_measurement == UnitOfTemperature.CELSIUS:
-            return 0
-        return 0
-
-    @property
-    def native_max_value(self) -> float:
-        """Return the maximum value."""
-        if self.native_unit_of_measurement == UnitOfTemperature.CELSIUS:
-            return 204
-        return 400
 
     async def async_added_to_hass(self) -> None:
         """Restore the last configured target when Home Assistant starts."""

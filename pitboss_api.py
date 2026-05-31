@@ -384,6 +384,11 @@ class PitbossApi:
 
         return self._state[key]
 
+    def is_fahrenheit(self) -> bool:
+        """Return True if the smoker is currently reporting Fahrenheit mode."""
+
+        return bool(self._state["IsFarenheit"])
+
     def apply_optimistic_state(self, state: dict) -> None:
         """Write expected state values immediately after a command.
 

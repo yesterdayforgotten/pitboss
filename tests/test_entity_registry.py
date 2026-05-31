@@ -133,13 +133,13 @@ async def test_entities_use_configured_device_name_for_initial_ids(
     config_entry.add_to_hass(hass)
 
     device_registry = dr.async_get(hass)
-    device_registry.async_get_or_create(
+    device = device_registry.async_get_or_create(
         config_entry_id=config_entry.entry_id,
         identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")},
         connections={(dr.CONNECTION_NETWORK_MAC, "aa:bb:cc:dd:ee:ff")},
         manufacturer="Pit Boss",
-        name="Porky",
     )
+    device_registry.async_update_device(device.id, name_by_user="Porky")
 
     with (
         patch("custom_components.pitboss.async_register_panel"),
@@ -159,12 +159,50 @@ async def test_entities_use_configured_device_name_for_initial_ids(
     ]
     entity_registry = er.async_get(hass)
 
-    assert device.name == "Porky"
+    assert device.name_by_user == "Porky"
     assert (
         entity_registry.async_get_entity_id(
             "binary_sensor", DOMAIN, "aa:bb:cc:dd:ee:ff_cook_active"
         )
         == "binary_sensor.porky_cook_active"
+    )
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_entities_use_device_default_name_for_initial_ids(
+    hass: HomeAssistant,
+) -> None:
+    """Test the device default MAC name drives initial entity ids when no device name exists."""
+
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Pit Boss PBL-0F78550",
+        data={"host": "192.0.2.10", DATA_DEVICE_INFO: DEVICE_INFO},
+        unique_id="aa:bb:cc:dd:ee:ff",
+        minor_version=2,
+    )
+    config_entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.pitboss.async_register_panel"),
+        patch(
+            "custom_components.pitboss.coordinator.PitbossDataUpdateCoordinator.async_initialize"
+        ),
+        patch(
+            "custom_components.pitboss.coordinator.PitbossDataUpdateCoordinator.async_config_entry_first_refresh"
+        ),
+    ):
+        assert await hass.config_entries.async_setup(config_entry.entry_id)
+
+    await hass.async_block_till_done()
+
+    entity_registry = er.async_get(hass)
+
+    assert (
+        entity_registry.async_get_entity_id(
+            "binary_sensor", DOMAIN, "aa:bb:cc:dd:ee:ff_cook_active"
+        )
+        == "binary_sensor.aa_bb_cc_dd_ee_ff_cook_active"
     )
 
 
@@ -212,6 +250,7 @@ async def test_device_info_projection_and_disabled_diagnostic_sensors(
 
     assert device.identifiers == {(DOMAIN, "aa:bb:cc:dd:ee:ff")}
     assert device.connections == {(dr.CONNECTION_NETWORK_MAC, "aa:bb:cc:dd:ee:ff")}
+    assert device.name == "AA:BB:CC:DD:EE:FF"
     assert device.model == "PBL-0F78550"
     assert device.model_id == "PBL-0F78550"
     assert device.serial_number == "aa:bb:cc:dd:ee:ff"

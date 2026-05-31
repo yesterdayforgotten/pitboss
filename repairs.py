@@ -1,15 +1,10 @@
 """Repairs and entity-id migration support for Pitboss."""
 
 import json
-from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.components.repairs import RepairsFlow
-try:
-    from homeassistant.components.repairs import RepairsFlowResult
-except ImportError:
-    RepairsFlowResult = dict[str, Any]
+from homeassistant.components.repairs import RepairsFlow, RepairsFlowResult
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import (
@@ -27,10 +22,33 @@ _ISSUE_TRANSLATION_KEY = "rename_entity_ids"
 _SOURCE_ENTITY_IDS_KEY = "source_entity_ids"
 
 
-def _issue_id(device_id: str) -> str:
+def build_issue_id(device_id: str, device_name: str) -> str:
     """Return the issue id for a device rename migration."""
 
-    return f"{_ISSUE_ID_PREFIX}{device_id}"
+    return f"{_ISSUE_ID_PREFIX}{device_id}_{slugify(device_name) or 'device'}"
+
+
+@callback
+def _delete_rename_issues_for_device(
+    hass: HomeAssistant,
+    issue_registry: ir.IssueRegistry,
+    device_id: str,
+    *,
+    keep_issue_id: str | None = None,
+) -> None:
+    """Delete rename issues for a device, optionally keeping one issue."""
+
+    for issue in tuple(issue_registry.issues.values()):
+        if (
+            issue.domain != DOMAIN
+            or not issue.issue_id.startswith(_ISSUE_ID_PREFIX)
+            or issue.data is None
+            or issue.data.get("device_id") != device_id
+            or issue.issue_id == keep_issue_id
+        ):
+            continue
+
+        ir.async_delete_issue(hass, DOMAIN, issue.issue_id)
 
 
 def _effective_device_name(
@@ -55,7 +73,7 @@ def _load_source_entity_ids(data: dict[str, str]) -> list[str]:
 
     try:
         source_entity_ids = json.loads(data[_SOURCE_ENTITY_IDS_KEY])
-    except (KeyError, TypeError, json.JSONDecodeError):
+    except KeyError, TypeError, json.JSONDecodeError:
         return []
 
     if not isinstance(source_entity_ids, list):
@@ -101,9 +119,9 @@ def _effective_issue_old_name(data: dict[str, str] | None) -> str | None:
 def _new_source_entity_ids(
     entity_registry: er.EntityRegistry,
     device_id: str,
-    previous_device_name: str,
+    current_device_name: str,
 ) -> list[str]:
-    """Return entity ids that still match the prior device-name-based pattern."""
+    """Return entity ids whose generated naming no longer matches the device name."""
 
     source_entity_ids: list[str] = []
     for entry in er.async_entries_for_device(
@@ -112,12 +130,11 @@ def _new_source_entity_ids(
         if entry.platform != DOMAIN or entry.original_name is None:
             continue
 
-        if entry.entity_id != _target_entity_id(
-            entry.domain, previous_device_name, entry.original_name
-        ):
-            continue
-
-        source_entity_ids.append(entry.entity_id)
+        target_entity_id = _target_entity_id(
+            entry.domain, current_device_name, entry.original_name
+        )
+        if entry.entity_id != target_entity_id:
+            source_entity_ids.append(entry.entity_id)
 
     source_entity_ids.sort()
     return source_entity_ids
@@ -134,10 +151,10 @@ def async_update_entity_id_rename_issue(
 
     device_registry = dr.async_get(hass)
     entity_registry = er.async_get(hass)
-    issue_id = _issue_id(device_id)
+    issue_registry = ir.async_get(hass)
 
     if (device := device_registry.async_get(device_id)) is None:
-        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        _delete_rename_issues_for_device(hass, issue_registry, device_id)
         return
 
     current_device_name = _effective_device_name(
@@ -148,7 +165,15 @@ def async_update_entity_id_rename_issue(
     if current_device_name == previous_device_name:
         return
 
-    issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+    issue_id = build_issue_id(device_id, current_device_name)
+    previous_issue = issue_registry.async_get_issue(
+        DOMAIN, build_issue_id(device_id, previous_device_name)
+    )
+    issue = (
+        previous_issue
+        if previous_issue is not None and previous_issue.dismissed_version is None
+        else issue_registry.async_get_issue(DOMAIN, issue_id)
+    )
     source_entity_ids = _existing_source_entity_ids(
         entity_registry,
         device_id,
@@ -159,12 +184,12 @@ def async_update_entity_id_rename_issue(
         source_entity_ids = _new_source_entity_ids(
             entity_registry,
             device_id,
-            previous_device_name,
+            current_device_name,
         )
         effective_old_name = previous_device_name
 
     if not source_entity_ids:
-        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        _delete_rename_issues_for_device(hass, issue_registry, device_id)
         return
 
     entity_count = str(len(source_entity_ids))
@@ -187,6 +212,9 @@ def async_update_entity_id_rename_issue(
             "new_name": current_device_name,
             "entity_count": entity_count,
         },
+    )
+    _delete_rename_issues_for_device(
+        hass, issue_registry, device_id, keep_issue_id=issue_id
     )
 
 
@@ -211,7 +239,7 @@ def async_track_entity_id_rename_issues(
 
         device_registry = dr.async_get(hass)
         if (device := device_registry.async_get(device_id)) is None:
-            ir.async_delete_issue(hass, DOMAIN, _issue_id(device_id))
+            _delete_rename_issues_for_device(hass, ir.async_get(hass), device_id)
             return
 
         previous_device_name = _effective_device_name(
@@ -251,7 +279,11 @@ class RenameEntityIdsRepairFlow(RepairsFlow):
     ) -> RepairsFlowResult:
         """Handle the first step of the repair flow."""
 
-        return await self.async_step_confirm()
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["confirm", "ignore"],
+            description_placeholders=self._placeholders,
+        )
 
     async def async_step_confirm(
         self, user_input: dict[str, str] | None = None
@@ -302,6 +334,14 @@ class RenameEntityIdsRepairFlow(RepairsFlow):
             description_placeholders=self._placeholders,
         )
 
+    async def async_step_ignore(
+        self, _: dict[str, str] | None = None
+    ) -> RepairsFlowResult:
+        """Ignore the rename repair issue."""
+
+        ir.async_ignore_issue(self.hass, DOMAIN, self.issue_id, True)
+        return self.async_abort(reason="issue_ignored")
+
 
 async def async_create_fix_flow(
     hass: HomeAssistant,
@@ -311,6 +351,6 @@ async def async_create_fix_flow(
     """Create the Pit Boss repairs flow."""
 
     del hass
-    assert issue_id.startswith(_ISSUE_ID_PREFIX)
-    assert data is not None
+    if not issue_id.startswith(_ISSUE_ID_PREFIX) or data is None:
+        raise ValueError(f"Invalid repair issue data for {issue_id!r}")
     return RenameEntityIdsRepairFlow(data)

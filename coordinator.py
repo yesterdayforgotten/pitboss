@@ -138,7 +138,6 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         )
         self.api = api
         self.config_entry = config_entry
-        self.nickname = config_entry.title
         self._store: Store[dict[str, Any]] = PitbossCookIndexStore(
             hass,
             COOK_STORAGE_VERSION,
@@ -197,23 +196,14 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             self._update_probe_target_reached_times(now)
             self._update_cook_tracking(now)
         except (ClientError, TimeoutError) as ex:
-            self._record_cook_error(
-                utcnow(),
-                "update",
-                f"Communication error while updating Pit Boss state: {ex}",
-            )
-            raise UpdateFailed(
-                f"Communication error while updating Pit Boss state: {ex}"
-            ) from ex
+            detail = str(ex) or type(ex).__name__
+            message = f"Communication error while updating Pit Boss state: {detail}"
+            self._record_cook_error(utcnow(), "update", message)
+            raise UpdateFailed(message) from ex
         except ValueError as ex:
-            self._record_cook_error(
-                utcnow(),
-                "update",
-                f"Received invalid data while updating Pit Boss state: {ex}",
-            )
-            raise UpdateFailed(
-                f"Received invalid data while updating Pit Boss state: {ex}"
-            ) from ex
+            message = f"Received invalid data while updating Pit Boss state: {ex}"
+            self._record_cook_error(utcnow(), "update", message)
+            raise UpdateFailed(message) from ex
 
     def reset_update_interval(self) -> None:
         """Restart the polling timer from now.
@@ -364,7 +354,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         actual = int(self.api.get_state_value(actual_key))
         minimum_temperature = (
             STALL_MINIMUM_TEMPERATURE_F
-            if self.api.get_state_value("IsFarenheit")
+            if self.api.is_fahrenheit()
             else STALL_MINIMUM_TEMPERATURE_C
         )
         if actual < minimum_temperature:
@@ -756,7 +746,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
     def _get_temperature_unit(self) -> str:
         """Return the current pit temperature unit."""
 
-        return "F" if self.api.get_state_value("IsFarenheit") else "C"
+        return "F" if self.api.is_fahrenheit() else "C"
 
     def _get_sample_bucket(self, timestamp: datetime) -> datetime:
         """Return the 5-minute bucket for a sample timestamp."""

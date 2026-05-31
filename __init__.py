@@ -12,7 +12,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DATA_DEVICE_INFO, DOMAIN, INFO_MAC, PLATFORMS
 from .coordinator import PitbossDataUpdateCoordinator
-from .panel import async_register_panel, async_unregister_panel
+from .panel import (
+    async_register_panel,
+    async_setup_panel_static,
+    async_unregister_panel,
+)
 from .pitboss_api import PitbossApi
 from .repairs import async_track_entity_id_rename_issues
 from .websocket_api import async_setup as async_setup_websocket_api
@@ -22,9 +26,7 @@ type PitbossConfigEntry = ConfigEntry[PitbossDataUpdateCoordinator]
 _LOGGER = logging.getLogger(__name__)
 
 
-async def _async_fetch_device_info(
-    hass: HomeAssistant, host: str
-) -> dict[str, object]:
+async def _async_fetch_device_info(hass: HomeAssistant, host: str) -> dict[str, object]:
     """Fetch normalized Pit Boss device info for a host."""
 
     api = PitbossApi(host, async_get_clientsession(hass))
@@ -41,7 +43,9 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     try:
         device_info = await _async_fetch_device_info(hass, host)
     except (ClientError, TimeoutError, ValueError) as err:
-        _LOGGER.warning("Unable to migrate Pit Boss entry %s: %s", config_entry.entry_id, err)
+        _LOGGER.warning(
+            "Unable to migrate Pit Boss entry %s: %s", config_entry.entry_id, err
+        )
         return False
 
     old_unique_id = config_entry.unique_id
@@ -58,7 +62,9 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
     device_registry = dr.async_get(hass)
     if old_unique_id and (
-        device := device_registry.async_get_device(identifiers={(DOMAIN, old_unique_id)})
+        device := device_registry.async_get_device(
+            identifiers={(DOMAIN, old_unique_id)}
+        )
     ):
         device_registry.async_update_device(
             device.id,
@@ -90,14 +96,9 @@ async def async_setup_entry(
     """Set up Pitboss from a config entry."""
 
     if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = {
-            "websocket_api_setup": False,
-            "panel_static_setup": False,
-        }
-
-    if not hass.data[DOMAIN]["websocket_api_setup"]:
+        hass.data[DOMAIN] = True
         async_setup_websocket_api(hass)
-        hass.data[DOMAIN]["websocket_api_setup"] = True
+        await async_setup_panel_static(hass)
 
     api = PitbossApi(
         config_entry.data[CONF_HOST],

@@ -51,6 +51,10 @@ class FakePitbossApi:
         """Return a fake state value."""
         return self._state[key]
 
+    def is_fahrenheit(self) -> bool:
+        """Return True if the fake device is in Fahrenheit mode."""
+        return bool(self._state["IsFarenheit"])
+
     async def update_state(self) -> None:
         """Pretend to refresh state."""
 

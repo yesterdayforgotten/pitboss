@@ -47,173 +47,157 @@ from .pitboss_api import PitbossApi
 class PitbossSensorEntityMixin:
     """Mixin for Pitboss sensor."""
 
-    value_fn: Callable[[PitbossApi, str], StateType]
+    state_key: str | None = None
+    device_info_key: str | None = None
+    value_fn: Callable[[PitbossApi], StateType] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
 class PitbossSensorEntityDescription(SensorEntityDescription, PitbossSensorEntityMixin):
     """Describes a Pitboss sensor."""
 
-    available_fn: Callable[[PitbossApi, str], bool] = lambda api, _: True
+    available_fn: Callable[[PitbossApi], bool] | None = None
 
 
 SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
     PitbossSensorEntityDescription(
         key="p1_act_temp",
         translation_key="p1_act_temp",
+        state_key="P1ActTemp",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        icon="mdi:thermometer",
-        value_fn=lambda api, _: api.get_state_value("P1ActTemp"),
     ),
     PitbossSensorEntityDescription(
         key="p2_act_temp",
         translation_key="p2_act_temp",
+        state_key="P2ActTemp",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        icon="mdi:thermometer",
-        value_fn=lambda api, _: api.get_state_value("P2ActTemp"),
     ),
     PitbossSensorEntityDescription(
         key="error_details",
         translation_key="error_details",
+        state_key="ErrorStr",
         entity_category=EntityCategory.DIAGNOSTIC,
         icon="mdi:alert",
-        value_fn=lambda api, _: api.get_state_value("ErrorStr"),
     ),
     PitbossSensorEntityDescription(
         key=INFO_UPTIME,
         translation_key="uptime",
+        device_info_key=INFO_UPTIME,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:timer-outline",
         native_unit_of_measurement=UnitOfTime.SECONDS,
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_RAM_SIZE,
         translation_key="ram_size",
+        device_info_key=INFO_RAM_SIZE,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:memory",
         native_unit_of_measurement=UnitOfInformation.BYTES,
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_RAM_FREE,
         translation_key="ram_free",
+        device_info_key=INFO_RAM_FREE,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:memory-arrow-down",
         native_unit_of_measurement=UnitOfInformation.BYTES,
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_RAM_MIN_FREE,
         translation_key="ram_min_free",
+        device_info_key=INFO_RAM_MIN_FREE,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:memory-arrow-down",
         native_unit_of_measurement=UnitOfInformation.BYTES,
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_FW_VERSION,
         translation_key="fw_version",
+        device_info_key=INFO_FW_VERSION,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:chip",
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_FW_ID,
         translation_key="fw_id",
+        device_info_key=INFO_FW_ID,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:identifier",
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_MG_VERSION,
         translation_key="mg_version",
+        device_info_key=INFO_MG_VERSION,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:chip",
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_MG_ID,
         translation_key="mg_id",
+        device_info_key=INFO_MG_ID,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:identifier",
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_FS_SIZE,
         translation_key="fs_size",
+        device_info_key=INFO_FS_SIZE,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:harddisk",
         native_unit_of_measurement=UnitOfInformation.BYTES,
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_FS_FREE,
         translation_key="fs_free",
+        device_info_key=INFO_FS_FREE,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:harddisk-plus",
         native_unit_of_measurement=UnitOfInformation.BYTES,
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_WIFI_STA_IP,
         translation_key="wifi_sta_ip",
+        device_info_key=INFO_WIFI_STA_IP,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:wifi-marker",
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_WIFI_AP_IP,
         translation_key="wifi_ap_ip",
+        device_info_key=INFO_WIFI_AP_IP,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:wifi-marker",
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_WIFI_STATUS,
         translation_key="wifi_status",
+        device_info_key=INFO_WIFI_STATUS,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:wifi-cog",
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
     PitbossSensorEntityDescription(
         key=INFO_WIFI_SSID,
         translation_key="wifi_ssid",
+        device_info_key=INFO_WIFI_SSID,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:wifi-star",
-        value_fn=lambda api, key: api.get_device_info_value(key),
-        available_fn=lambda api, key: api.get_device_info_value(key) is not None,
     ),
 )
 
@@ -266,7 +250,7 @@ class PitbossSensor(PitbossEntity, SensorEntity):
     def native_unit_of_measurement(self) -> str | None:
         """Return the unit of measurement for temperature sensors."""
         if self.entity_description.device_class == SensorDeviceClass.TEMPERATURE:
-            if not self._api.get_state_value("IsFarenheit"):
+            if not self._api.is_fahrenheit():
                 return UnitOfTemperature.CELSIUS
             return UnitOfTemperature.FAHRENHEIT
         return self.entity_description.native_unit_of_measurement
@@ -274,14 +258,31 @@ class PitbossSensor(PitbossEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Return True if the entity is available."""
-        return super().available and self.entity_description.available_fn(
-            self._api, self.entity_description.key
-        )
+        if (available_fn := self.entity_description.available_fn) is not None:
+            return super().available and available_fn(self._api)
+
+        if (device_info_key := self.entity_description.device_info_key) is not None:
+            return super().available and (
+                self._api.get_device_info_value(device_info_key) is not None
+            )
+
+        return super().available
 
     @property
     def native_value(self) -> StateType:
         """Return the sensor state."""
-        return self.entity_description.value_fn(self._api, self.entity_description.key)
+        if (value_fn := self.entity_description.value_fn) is not None:
+            return value_fn(self._api)
+
+        if (state_key := self.entity_description.state_key) is not None:
+            return self._api.get_state_value(state_key)
+
+        if (device_info_key := self.entity_description.device_info_key) is not None:
+            return self._api.get_device_info_value(device_info_key)
+
+        raise RuntimeError(
+            f"Pitboss sensor {self.entity_description.key!r} has no value source"
+        )
 
 
 class PitbossLastSuccessfulUpdateSensor(PitbossEntity, SensorEntity):
@@ -486,7 +487,7 @@ class PitbossTemperatureRateSensor(PitbossEntity, SensorEntity):
         """Return the rate unit using the current temperature mode."""
         base_unit = (
             UnitOfTemperature.CELSIUS
-            if not self._api.get_state_value("IsFarenheit")
+            if not self._api.is_fahrenheit()
             else UnitOfTemperature.FAHRENHEIT
         )
         return (
@@ -541,7 +542,7 @@ class PitbossProbeTemperatureDeltaSensor(PitbossEntity, SensorEntity):
     @property
     def native_unit_of_measurement(self) -> str:
         """Return the unit of measurement using the current temperature mode."""
-        if not self._api.get_state_value("IsFarenheit"):
+        if not self._api.is_fahrenheit():
             return UnitOfTemperature.CELSIUS
         return UnitOfTemperature.FAHRENHEIT
 

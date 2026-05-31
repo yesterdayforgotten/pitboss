@@ -11,7 +11,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.event import async_call_later
-from homeassistant.helpers.typing import UNDEFINED, UndefinedType
+from homeassistant.core import HassJob
+from homeassistant.helpers.typing import UNDEFINED
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
@@ -45,35 +46,39 @@ class PitbossEntity(CoordinatorEntity[PitbossDataUpdateCoordinator]):
         super().__init__(coordinator)
         device_info = coordinator.config_entry.data.get(DATA_DEVICE_INFO, {})
         host = coordinator.config_entry.data.get(CONF_HOST)
-        registry_device_id = device_info.get(INFO_MAC) or device_id
-        connections = None
-        if mac_address := device_info.get(INFO_MAC):
-            connections = {(CONNECTION_NETWORK_MAC, mac_address)}
+        mac_address = device_info.get(INFO_MAC)
+        registry_device_id = mac_address or device_id
         self._attr_unique_id = f"{device_id}_{description.key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, registry_device_id)},
-            connections=connections,
             manufacturer="Pit Boss",
             model=device_info.get(INFO_MODEL_ID),
             model_id=device_info.get(INFO_MODEL_ID),
-            serial_number=device_info.get(INFO_MAC),
+            serial_number=mac_address,
             sw_version=device_info.get(INFO_FW_VERSION),
             hw_version=device_info.get(INFO_MG_VERSION),
             configuration_url=None if host is None else f"http://{host}",
         )
+        if mac_address:
+            self._attr_device_info["connections"] = {
+                (CONNECTION_NETWORK_MAC, mac_address)
+            }
+            self._attr_device_info["name"] = mac_address.upper()
 
     def _device_name_for_entity_id(self) -> str:
         """Return the device name to use for entity ids."""
 
-        if (device := getattr(self, "device_entry", None)) is not None:
-            return (
-                device.name_by_user
-                or device.name
-                or self.coordinator.config_entry.title
-                or DEFAULT_NAME
-            )
+        if mac_address := self.coordinator.config_entry.data.get(
+            DATA_DEVICE_INFO, {}
+        ).get(INFO_MAC):
+            default_device_name = mac_address.upper()
+        else:
+            default_device_name = self.coordinator.config_entry.title or DEFAULT_NAME
 
-        return self.coordinator.config_entry.title or DEFAULT_NAME
+        if (device := getattr(self, "device_entry", None)) is not None:
+            return device.name_by_user or device.name or default_device_name
+
+        return default_device_name
 
     @property
     def internal_integration_suggested_object_id(self) -> str | None:
@@ -81,9 +86,6 @@ class PitbossEntity(CoordinatorEntity[PitbossDataUpdateCoordinator]):
 
         name = self.name
         if name in (None, UNDEFINED):
-            return None
-
-        if isinstance(name, UndefinedType):
             return None
 
         return f"{self._device_name_for_entity_id()} {name}"
@@ -116,14 +118,10 @@ class PitbossEntity(CoordinatorEntity[PitbossDataUpdateCoordinator]):
         """Reset polling and schedule a delayed confirmation refresh."""
 
         self.coordinator.reset_update_interval()
-
-        async def _request_refresh(_now) -> None:
-            await self.coordinator.async_request_refresh()
-
         async_call_later(
             self.hass,
             3,
-            _request_refresh,
+            HassJob(self.coordinator.async_request_refresh),
         )
 
     async def _async_run_debounced_api_command(

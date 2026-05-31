@@ -8,10 +8,8 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import StateType
 
 from . import PitbossConfigEntry
 from .entity import PitbossEntity
@@ -22,7 +20,8 @@ from .pitboss_api import PitbossApi
 class PitbossBinarySensorEntityMixin:
     """Mixin for Pitboss sensor."""
 
-    value_fn: Callable[[PitbossApi, str], StateType]
+    state_key: str | None = None
+    value_fn: Callable[[PitbossApi], bool] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -31,37 +30,33 @@ class PitbossBinarySensorEntityDescription(
 ):
     """Describes a Pitboss sensor."""
 
-    available_fn: Callable[[PitbossApi, str], bool] = lambda api, _: True
+    available_fn: Callable[[PitbossApi], bool] | None = None
 
 
 SENSOR_TYPES: tuple[PitbossBinarySensorEntityDescription, ...] = (
     PitbossBinarySensorEntityDescription(
         key="primer_state",
         translation_key="primer_state",
+        state_key="Priming",
         icon="mdi:motion",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda api, _: api.get_state_value("Priming"),
     ),
     PitbossBinarySensorEntityDescription(
         key="fan_state",
         translation_key="fan_state",
+        state_key="FanOn",
         icon="mdi:fan",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda api, _: api.get_state_value("FanOn"),
     ),
     PitbossBinarySensorEntityDescription(
         key="igniter_state",
         translation_key="igniter_state",
+        state_key="IgniterOn",
         icon="mdi:gas-burner",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda api, _: api.get_state_value("IgniterOn"),
     ),
     PitbossBinarySensorEntityDescription(
         key="error_state",
         translation_key="error_state",
-        icon="mdi:alert",
+        state_key="Error",
         device_class=BinarySensorDeviceClass.PROBLEM,
-        value_fn=lambda api, _: api.get_state_value("Error"),
     ),
 )
 
@@ -102,15 +97,22 @@ class PitbossBinarySensor(PitbossEntity, BinarySensorEntity):
     @property
     def available(self) -> bool:
         """Return True if the entity is available."""
-        return super().available and self.entity_description.available_fn(
-            self._api, self.entity_description.key
-        )
+        if (available_fn := self.entity_description.available_fn) is not None:
+            return super().available and available_fn(self._api)
+
+        return super().available
 
     @property
     def is_on(self) -> bool:
         """Return the sensor state."""
-        return bool(
-            self.entity_description.value_fn(self._api, self.entity_description.key)
+        if (value_fn := self.entity_description.value_fn) is not None:
+            return value_fn(self._api)
+
+        if (state_key := self.entity_description.state_key) is not None:
+            return bool(self._api.get_state_value(state_key))
+
+        raise RuntimeError(
+            f"Pitboss binary sensor {self.entity_description.key!r} has no value source"
         )
 
 
@@ -139,11 +141,6 @@ class PitbossProbeStallBinarySensor(PitbossEntity, BinarySensorEntity):
                 translation_key=self._translation_keys[actual_key],
             ),
         )
-
-    @property
-    def available(self) -> bool:
-        """Return True if the probe itself is available."""
-        return super().available
 
     @property
     def is_on(self) -> bool:

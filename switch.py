@@ -12,14 +12,17 @@ from . import PitbossConfigEntry
 from .entity import PitbossEntity
 from .pitboss_api import PitbossApi
 
+type OptimisticState = dict[str, bool | int | float | str | None]
+
 
 @dataclass(frozen=True, kw_only=True)
 class PitbossSwitchEntityMixin:
     """Mixin for Pitboss switch."""
 
     is_on_fn: Callable[[PitbossApi, str], bool]
-    turn_on_fn: Callable[[PitbossApi, str], Awaitable[None]]
-    turn_off_fn: Callable[[PitbossApi, str], Awaitable[None]]
+    turn_on_fn: Callable[[PitbossApi], Awaitable[None]]
+    turn_off_fn: Callable[[PitbossApi], Awaitable[None]]
+    api_key: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -27,18 +30,19 @@ class PitbossSwitchEntityDescription(SwitchEntityDescription, PitbossSwitchEntit
     """Describes a Pitboss switch."""
 
     available_fn: Callable[[PitbossApi, str], bool] = lambda api, _: True
-    optimistic_on_state: dict = field(default_factory=dict)
-    optimistic_off_state: dict = field(default_factory=dict)
+    optimistic_on_state: OptimisticState = field(default_factory=dict)
+    optimistic_off_state: OptimisticState = field(default_factory=dict)
 
 
 SWITCHES: tuple[PitbossSwitchEntityDescription, ...] = (
     PitbossSwitchEntityDescription(
         key="primer",
         translation_key="primer",
+        api_key="Priming",
         icon="mdi:motion",
-        is_on_fn=lambda api, _: api.get_state_value("Priming"),
-        turn_on_fn=lambda api, _: api.set_prime_state(True),
-        turn_off_fn=lambda api, _: api.set_prime_state(False),
+        is_on_fn=lambda api, api_key: api.get_state_value(api_key),
+        turn_on_fn=lambda api: api.set_prime_state(True),
+        turn_off_fn=lambda api: api.set_prime_state(False),
         optimistic_on_state={"Priming": True},
         optimistic_off_state={"Priming": False},
     ),
@@ -67,16 +71,16 @@ class PitbossSwitch(PitbossEntity, SwitchEntity):
     @property
     def available(self) -> bool:
         """Return True if the entity is available."""
+        key = self.entity_description.api_key or self.entity_description.key
         return super().available and self.entity_description.available_fn(
-            self._api, self.entity_description.key
+            self._api, key
         )
 
     @property
     def is_on(self) -> bool:
         """Return the sensor state."""
-        return bool(
-            self.entity_description.is_on_fn(self._api, self.entity_description.key)
-        )
+        key = self.entity_description.api_key or self.entity_description.key
+        return bool(self.entity_description.is_on_fn(self._api, key))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch."""
@@ -84,7 +88,6 @@ class PitbossSwitch(PitbossEntity, SwitchEntity):
             f"turn off {self.entity_description.key}",
             self.entity_description.turn_off_fn,
             self._api,
-            self.entity_description.key,
         )
         if self.entity_description.optimistic_off_state:
             self._api.apply_optimistic_state(
@@ -98,7 +101,6 @@ class PitbossSwitch(PitbossEntity, SwitchEntity):
             f"turn on {self.entity_description.key}",
             self.entity_description.turn_on_fn,
             self._api,
-            self.entity_description.key,
         )
         if self.entity_description.optimistic_on_state:
             self._api.apply_optimistic_state(

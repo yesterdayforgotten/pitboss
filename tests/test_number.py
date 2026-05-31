@@ -3,9 +3,13 @@
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from homeassistant.core import HomeAssistant
 from homeassistant.components.number import NumberEntityDescription
 from homeassistant.util.dt import utcnow
+from homeassistant.util.unit_conversion import TemperatureConverter
+from homeassistant.const import UnitOfTemperature
 
 from tests.common import MockConfigEntry, async_fire_time_changed
 
@@ -35,6 +39,10 @@ class FakePitbossApi:
         """Return a fake state value."""
         return self._state[key]
 
+    def is_fahrenheit(self) -> bool:
+        """Return True if the fake device is in Fahrenheit mode."""
+        return bool(self._state["IsFarenheit"])
+
     async def update_device_info(self) -> dict[str, str]:
         """Pretend to refresh device info."""
 
@@ -52,6 +60,138 @@ class FakePitbossApi:
         """Apply optimistic state updates."""
 
         self._state.update(state)
+
+
+def _create_coordinator(
+    hass: HomeAssistant,
+    *,
+    is_fahrenheit: bool,
+) -> tuple[PitbossDataUpdateCoordinator, str]:
+    """Create a coordinator backed by a fake API with the desired unit mode."""
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Pit Boss",
+        data={},
+        unique_id="pitboss-test",
+        minor_version=2,
+    )
+    config_entry.add_to_hass(hass)
+
+    api = FakePitbossApi()
+    api._state["IsFarenheit"] = is_fahrenheit
+    return PitbossDataUpdateCoordinator(hass, api, config_entry), config_entry.unique_id
+
+
+@pytest.mark.parametrize(
+    ("is_fahrenheit", "expected_min", "expected_max"),
+    [
+        pytest.param(True, 130.0, 400.0, id="fahrenheit"),
+        pytest.param(
+            False,
+            TemperatureConverter.convert(
+                130,
+                UnitOfTemperature.FAHRENHEIT,
+                UnitOfTemperature.CELSIUS,
+            ),
+            TemperatureConverter.convert(
+                400,
+                UnitOfTemperature.FAHRENHEIT,
+                UnitOfTemperature.CELSIUS,
+            ),
+            id="celsius",
+        ),
+    ],
+)
+async def test_probe_target_limits_follow_temperature_mode(
+    hass: HomeAssistant,
+    is_fahrenheit: bool,
+    expected_min: float,
+    expected_max: float,
+) -> None:
+    """Test Probe 1 limits are converted from Fahrenheit in Celsius mode."""
+    coordinator, device_id = _create_coordinator(hass, is_fahrenheit=is_fahrenheit)
+
+    entity = PitbossProbeTargetNumber(
+        coordinator,
+        device_id,
+        description=NumberEntityDescription(
+            key="probe1_target_temp",
+            translation_key="probe1_target_temp",
+        ),
+    )
+
+    assert entity.native_min_value == expected_min
+    assert entity.native_max_value == expected_max
+
+
+@pytest.mark.parametrize(
+    ("is_fahrenheit", "expected_min", "expected_max"),
+    [
+        pytest.param(True, 130.0, 400.0, id="fahrenheit"),
+        pytest.param(
+            False,
+            TemperatureConverter.convert(
+                130,
+                UnitOfTemperature.FAHRENHEIT,
+                UnitOfTemperature.CELSIUS,
+            ),
+            TemperatureConverter.convert(
+                400,
+                UnitOfTemperature.FAHRENHEIT,
+                UnitOfTemperature.CELSIUS,
+            ),
+            id="celsius",
+        ),
+    ],
+)
+async def test_virtual_probe_target_limits_follow_temperature_mode(
+    hass: HomeAssistant,
+    is_fahrenheit: bool,
+    expected_min: float,
+    expected_max: float,
+) -> None:
+    """Test Probe 2 limits are converted from Fahrenheit in Celsius mode."""
+    coordinator, device_id = _create_coordinator(hass, is_fahrenheit=is_fahrenheit)
+
+    entity = PitbossVirtualProbeTargetNumber(
+        coordinator,
+        device_id,
+        description=NumberEntityDescription(
+            key="probe2_target_temp",
+            translation_key="probe2_target_temp",
+        ),
+    )
+
+    assert entity.native_min_value == expected_min
+    assert entity.native_max_value == expected_max
+
+
+async def test_probe_target_step_size_is_ten(
+    hass: HomeAssistant,
+) -> None:
+    """Probe target controls should use a 10-degree step in the UI."""
+
+    coordinator, device_id = _create_coordinator(hass, is_fahrenheit=True)
+
+    probe1_entity = PitbossProbeTargetNumber(
+        coordinator,
+        device_id,
+        description=NumberEntityDescription(
+            key="probe1_target_temp",
+            translation_key="probe1_target_temp",
+        ),
+    )
+    probe2_entity = PitbossVirtualProbeTargetNumber(
+        coordinator,
+        device_id,
+        description=NumberEntityDescription(
+            key="probe2_target_temp",
+            translation_key="probe2_target_temp",
+        ),
+    )
+
+    assert probe1_entity.native_step == 10
+    assert probe2_entity.native_step == 10
 
 
 async def test_probe2_target_number_has_editable_default_value(

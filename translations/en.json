@@ -65,10 +65,21 @@
         "rename_entity_ids": {
             "description": "The Pit Boss device was renamed from **{old_name}** to **{new_name}**. Pit Boss can rename **{entity_count}** auto-generated entity IDs that still follow the older device-name pattern.",
             "fix_flow": {
+                "abort": {
+                    "issue_ignored": "Issue ignored"
+                },
                 "error": {
                     "rename_conflict": "Some entity IDs could not be renamed because their new IDs are already in use. Resolve the conflicting IDs and try again."
                 },
                 "step": {
+                    "init": {
+                        "description": "The Pit Boss device was renamed from **{old_name}** to **{new_name}**. You can rename **{entity_count}** matching auto-generated entity IDs so they follow the current device name, or ignore this issue and keep the current entity IDs.",
+                        "menu_options": {
+                            "confirm": "Rename entity IDs",
+                            "ignore": "Ignore"
+                        },
+                        "title": "Rename entity IDs to match {new_name}"
+                    },
                     "confirm": {
                         "description": "The Pit Boss device was renamed from **{old_name}** to **{new_name}**. Submitting this repair will rename **{entity_count}** matching auto-generated entity IDs so they follow the current device name. This may require updating any dashboards, automations, or scripts that still reference the older entity IDs.",
                         "title": "Rename entity IDs to match {new_name}"

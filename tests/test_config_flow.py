@@ -9,7 +9,7 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
-from custom_components.pitboss.const import DATA_DEVICE_INFO, DEFAULT_NAME, DOMAIN
+from custom_components.pitboss.const import DATA_DEVICE_INFO, DOMAIN
 from custom_components.pitboss.config_flow import CONF_SUBNET, UnsupportedModel
 
 
@@ -51,7 +51,7 @@ async def test_user_flow_manual_entry(hass: HomeAssistant) -> None:
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == DEFAULT_NAME
+    assert result["title"] == "Pit Boss PBL-0F78550"
     assert result["data"] == {CONF_HOST: "192.0.2.10", DATA_DEVICE_INFO: device_info}
 
 
@@ -81,6 +81,7 @@ async def test_user_flow_discovery_selection(hass: HomeAssistant) -> None:
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "discover"
+    assert {key.schema for key in result["data_schema"].schema} == {CONF_HOST}
 
     selector = result["data_schema"].schema[next(iter(result["data_schema"].schema))]
     assert selector.config["options"] == [
@@ -98,6 +99,7 @@ async def test_user_flow_discovery_selection(hass: HomeAssistant) -> None:
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Pit Boss PBL-0F78550"
     assert result["data"] == {
         CONF_HOST: "192.0.2.10",
         DATA_DEVICE_INFO: {
@@ -140,6 +142,8 @@ async def test_user_flow_discovery_falls_back_to_custom_subnet(
         assert result["type"] is FlowResultType.FORM
         assert result["step_id"] == "discover_subnet"
         assert {key.schema for key in result["data_schema"].schema} == {CONF_SUBNET}
+        subnet_key = next(iter(result["data_schema"].schema))
+        assert subnet_key.default() == "192.168.0.0/24"
 
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
