@@ -1,10 +1,16 @@
 """Repairs and entity-id migration support for Pitboss."""
 
 import json
+from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.components.repairs import RepairsFlow, RepairsFlowResult
+try:
+    from homeassistant.components.repairs import RepairsFlow, RepairsFlowResult
+except ImportError:
+    from homeassistant.components.repairs import RepairsFlow
+
+    RepairsFlowResult = dict[str, Any]
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import (
