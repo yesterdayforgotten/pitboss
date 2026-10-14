@@ -3,14 +3,16 @@
         "abort": {
             "no_devices_found": "No devices found on the network",
             "single_instance_allowed": "Already configured. Only a single configuration possible.",
-            "reconfigure_successful": "Configuration was updated successfully"
+            "reconfigure_successful": "Configuration was updated successfully",
+            "already_configured": "Device is already configured",
+            "wrong_device": "That address belongs to a different smoker. To add another smoker, set it up as a new integration instead."
         },
         "error": {
             "cannot_connect": "Failed to connect",
             "invalid_subnet": "Enter a valid IPv4 subnet in CIDR notation.",
             "no_devices_found": "No supported smokers were found in that subnet.",
             "subnet_too_large": "Subnet scan must be limited to 256 addresses or fewer.",
-            "unsupported_model": "This smoker model is not supported: {model}.",
+            "unsupported_model": "The device at that address ({model}) does not respond like a Pit Boss smoker.",
             "unknown": "Unexpected error"
         },
         "step": {
@@ -123,6 +125,9 @@
             },
             "primer_state": {
                 "name": "Primer Status"
+            },
+            "grill_temp_alert": {
+                "name": "Smoker Temperature Alert"
             }
         },
         "climate": {
@@ -225,6 +230,12 @@
             },
             "error_details": {
                 "name": "Error Information"
+            },
+            "p1_eta": {
+                "name": "Probe 1 Estimated Done"
+            },
+            "p2_eta": {
+                "name": "Probe 2 Estimated Done"
             }
         },
         "switch": {

@@ -7,11 +7,12 @@ from aiohttp import ClientError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DATA_DEVICE_INFO, DOMAIN, INFO_MAC, PLATFORMS
-from .coordinator import PitbossDataUpdateCoordinator
+from .coordinator import PitbossDataUpdateCoordinator, async_remove_cook_storage
 from .panel import (
     async_register_panel,
     async_setup_panel_static,
@@ -43,10 +44,15 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     try:
         device_info = await _async_fetch_device_info(hass, host)
     except (ClientError, TimeoutError, ValueError) as err:
-        _LOGGER.warning(
-            "Unable to migrate Pit Boss entry %s: %s", config_entry.entry_id, err
+        # The smoker is usually powered off. Returning False would park the
+        # entry in MIGRATION_ERROR until HA restarts, so defer instead: setup
+        # raises ConfigEntryNotReady and HA retries the migration with backoff.
+        _LOGGER.info(
+            "Deferring migration of Pit Boss entry %s until the smoker is reachable: %s",
+            config_entry.entry_id,
+            err,
         )
-        return False
+        return True
 
     old_unique_id = config_entry.unique_id
     new_unique_id = device_info[INFO_MAC]
@@ -95,6 +101,11 @@ async def async_setup_entry(
 ) -> bool:
     """Set up Pitboss from a config entry."""
 
+    if config_entry.version == 1 and config_entry.minor_version < 2:
+        raise ConfigEntryNotReady(
+            "Waiting for the smoker to come online to finish migrating this entry"
+        )
+
     if DOMAIN not in hass.data:
         hass.data[DOMAIN] = True
         async_setup_websocket_api(hass)
@@ -138,10 +149,19 @@ async def async_unload_entry(
 ) -> bool:
     """Unload a config entry."""
 
-    config_entry.runtime_data.cancel_pending_commands()
+    coordinator = config_entry.runtime_data
+    coordinator.cancel_pending_commands()
     unload_ok = await hass.config_entries.async_unload_platforms(
         config_entry, PLATFORMS
     )
     if unload_ok:
         async_unregister_panel(hass, config_entry)
+        # Flush before a reload's new coordinator reads the same storage files.
+        await coordinator.async_shutdown()
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+    """Delete the cook archive when a Pit Boss entry is removed."""
+
+    await async_remove_cook_storage(hass, config_entry.entry_id)

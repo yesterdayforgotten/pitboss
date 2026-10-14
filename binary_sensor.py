@@ -77,6 +77,7 @@ async def async_setup_entry(
                 for description in SENSOR_TYPES
             ),
             PitbossCookActiveBinarySensor(coordinator, device_id),
+            PitbossGrillTemperatureAlertBinarySensor(coordinator, device_id),
             PitbossProbeStallBinarySensor(coordinator, device_id, "P1ActTemp"),
             PitbossProbeStallBinarySensor(coordinator, device_id, "P2ActTemp"),
             PitbossProbeDoneBinarySensor(
@@ -209,3 +210,30 @@ class PitbossProbeDoneBinarySensor(PitbossEntity, BinarySensorEntity):
     def is_on(self) -> bool:
         """Return if the probe has met or exceeded its target."""
         return self.coordinator.is_probe_done(self._actual_key, self._target_key)
+
+
+class PitbossGrillTemperatureAlertBinarySensor(PitbossEntity, BinarySensorEntity):
+    """Indicate the smoker has drifted far from its setpoint for a while.
+
+    Usually means a flameout or an empty hopper. Only armed once the smoker
+    has reached its current setpoint, so warm-up never trips it.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_icon = "mdi:fire-alert"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        """Initialize the smoker temperature alert sensor."""
+        super().__init__(
+            coordinator,
+            device_id,
+            BinarySensorEntityDescription(
+                key="grill_temp_alert",
+                translation_key="grill_temp_alert",
+            ),
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True while the smoker temperature is off target."""
+        return self.coordinator.is_grill_temperature_alert()

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from homeassistant.components.websocket_api import const as websocket_api_const
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util.dt import utcnow
@@ -37,6 +38,7 @@ class FakePitbossApi:
             "GrillSetTemp": 225,
             "GrillActTemp": 215,
             "IsFarenheit": True,
+            "PowerOn": False,
             "Error": False,
             "ErrorStr": "",
         }
@@ -73,6 +75,7 @@ def _create_coordinator(
         data={},
         unique_id="pitboss-test",
         minor_version=2,
+        state=ConfigEntryState.LOADED,
     )
     config_entry.add_to_hass(hass)
     coordinator = PitbossDataUpdateCoordinator(hass, FakePitbossApi(), config_entry)
@@ -222,6 +225,10 @@ async def test_update_cook_annotations(
     assert msg["success"]
     assert msg["result"]["cook"]["annotations"] == {
         "tags": ["brisket", "overnight"],
+        "title": None,
+        "food": None,
+        "weight": None,
+        "pellets": None,
         "notes": "wrapped at 165F",
     }
 
@@ -325,7 +332,7 @@ async def test_get_cook_includes_recorded_device_and_update_errors(
         {
             "timestamp": (stall_start + STALL_CONFIRMATION_WINDOW).isoformat(),
             "source": "device",
-            "message": "NoPellets",
+            "message": "Out of pellets",
             "end_timestamp": probe_removed_at.isoformat(),
         },
         {
@@ -334,3 +341,135 @@ async def test_get_cook_includes_recorded_device_and_update_errors(
             "message": "Communication error while updating Pit Boss state: boom",
         },
     ]
+
+
+async def test_list_cooks_skips_entries_that_are_not_loaded(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """An entry stuck in setup retry has no runtime_data and must be skipped."""
+    config_entry, coordinator = _create_coordinator(hass)
+    _complete_confirmed_cook(
+        coordinator, utcnow().replace(minute=0, second=0, microsecond=0)
+    )
+    retrying_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Pit Boss 2",
+        data={},
+        unique_id="pitboss-retrying",
+        minor_version=2,
+        state=ConfigEntryState.SETUP_RETRY,
+    )
+    retrying_entry.add_to_hass(hass)
+    async_setup_websocket_api(hass)
+    client = await hass_ws_client(hass)
+
+    await client.send_json({"id": 1, "type": "pitboss/list_cooks"})
+    response = await client.receive_json()
+    assert response["success"]
+    assert len(response["result"]["cooks"]) == 1
+
+    await client.send_json(
+        {
+            "id": 2,
+            "type": "pitboss/list_cooks",
+            "config_entry_id": retrying_entry.entry_id,
+        }
+    )
+    response = await client.receive_json()
+    assert not response["success"]
+    assert response["error"]["code"] == websocket_api_const.ERR_NOT_FOUND
+
+
+async def test_update_cook_details(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """Title, food, weight and pellets can be set without touching notes."""
+    config_entry, coordinator = _create_coordinator(hass)
+    cook_id = _complete_confirmed_cook(
+        coordinator, utcnow().replace(minute=0, second=0, microsecond=0)
+    )
+    await coordinator.async_update_cook_annotations(cook_id, notes="keep me")
+    async_setup_websocket_api(hass)
+
+    client = await hass_ws_client(hass)
+    await client.send_json(
+        {
+            "id": 9,
+            "type": "pitboss/update_cook_annotations",
+            "config_entry_id": config_entry.entry_id,
+            "cook_id": cook_id,
+            "title": "Christmas brisket",
+            "food": "Brisket",
+            "weight": "14 lb",
+            "pellets": None,
+        }
+    )
+    msg = await client.receive_json()
+
+    assert msg["success"]
+    assert msg["result"]["cook"]["annotations"] == {
+        "tags": [],
+        "title": "Christmas brisket",
+        "food": "Brisket",
+        "weight": "14 lb",
+        "pellets": None,
+        "notes": "keep me",
+    }
+
+
+async def test_subscribe_live_streams_snapshots(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """The live subscription sends a snapshot now and after each update."""
+    config_entry, coordinator = _create_coordinator(hass)
+    coordinator.api._state["P1ActTemp"] = 165
+    coordinator._update_cook_tracking(utcnow())
+    async_setup_websocket_api(hass)
+
+    client = await hass_ws_client(hass)
+    await client.send_json(
+        {
+            "id": 7,
+            "type": "pitboss/subscribe_live",
+            "config_entry_id": config_entry.entry_id,
+        }
+    )
+    msg = await client.receive_json()
+    assert msg["success"]
+
+    msg = await client.receive_json()
+    assert msg["type"] == "event"
+    assert msg["event"]["config_entry_id"] == config_entry.entry_id
+    assert msg["event"]["cook"]["confirmed"] is False
+    assert msg["event"]["probe1"]["actual"] == 165
+
+    coordinator.api._state["P1ActTemp"] = 170
+    coordinator.async_update_listeners()
+    msg = await client.receive_json()
+    assert msg["event"]["probe1"]["actual"] == 170
+
+    await client.send_json(
+        {"id": 8, "type": "unsubscribe_events", "subscription": 7}
+    )
+    msg = await client.receive_json()
+    assert msg["success"]
+
+
+async def test_subscribe_live_unknown_entry(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """Subscribing to a missing entry returns not found."""
+    async_setup_websocket_api(hass)
+
+    client = await hass_ws_client(hass)
+    await client.send_json(
+        {"id": 10, "type": "pitboss/subscribe_live", "config_entry_id": "missing"}
+    )
+    msg = await client.receive_json()
+
+    assert not msg["success"]
+    assert msg["error"]["code"] == websocket_api_const.ERR_NOT_FOUND

@@ -1,4 +1,5 @@
 {
-  "name":"Pitboss Integration",
-  "content_in_root":true
+  "name": "Pitboss Integration",
+  "content_in_root": true,
+  "homeassistant": "2024.11.0"
 }

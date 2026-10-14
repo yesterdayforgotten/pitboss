@@ -31,7 +31,6 @@ from .const import (
     INFO_APP,
     INFO_MAC,
     INFO_MODEL_ID,
-    SUPPORTED_MODEL_IDS,
 )
 from .pitboss_api import PitbossApi
 
@@ -115,7 +114,7 @@ async def _async_validate_input(
     if not unique_id:
         raise InvalidResponse
 
-    if model not in SUPPORTED_MODEL_IDS:
+    if not await api.async_is_pitboss(timeout=timeout):
         raise UnsupportedModel(model)
 
     return device_info
@@ -223,7 +222,7 @@ class PitbossConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> PitbossOptionsFlow:
+    def async_get_options_flow(config_entry: ConfigEntry) -> "PitbossOptionsFlow":
         """Return the options flow handler."""
         return PitbossOptionsFlow()
 
@@ -346,6 +345,13 @@ class PitbossConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception as err:  # pylint: disable=broad-except
                 _set_validate_input_error(err, errors, description_placeholders)
             else:
+                # Entries not yet migrated still carry the legacy unique id;
+                # reconfiguring their host is how an offline migration recovers.
+                if (
+                    reconfigure_entry.minor_version >= 2
+                    and reconfigure_entry.unique_id != device_info[INFO_MAC]
+                ):
+                    return self.async_abort(reason="wrong_device")
                 return self.async_update_reload_and_abort(
                     reconfigure_entry,
                     data_updates=_entry_data_from_user_input(user_input, device_info),
@@ -395,7 +401,7 @@ class InvalidResponse(HomeAssistantError):
 
 
 class UnsupportedModel(HomeAssistantError):
-    """Error to indicate the smoker model is not supported."""
+    """Error to indicate the device does not speak the Pit Boss protocol."""
 
     def __init__(self, model: str) -> None:
         """Initialize the unsupported smoker model error."""

@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import (
     area_registry as ar,
@@ -251,9 +252,9 @@ async def test_device_info_projection_and_disabled_diagnostic_sensors(
     assert device.identifiers == {(DOMAIN, "aa:bb:cc:dd:ee:ff")}
     assert device.connections == {(dr.CONNECTION_NETWORK_MAC, "aa:bb:cc:dd:ee:ff")}
     assert device.name == "AA:BB:CC:DD:EE:FF"
-    assert device.model == "PBL-0F78550"
-    assert device.model_id == "PBL-0F78550"
-    assert device.serial_number == "aa:bb:cc:dd:ee:ff"
+    # Sys.GetInfo's id is unique per controller, so it is the serial number.
+    assert device.model is None
+    assert device.serial_number == "PBL-0F78550"
     assert device.sw_version == "1.2.3"
     assert device.hw_version == "2.3.4"
     assert device.configuration_url == "http://192.0.2.10"
@@ -325,3 +326,30 @@ async def test_migrate_entry_moves_unique_ids_to_mac(hass: HomeAssistant) -> Non
         )
         == "binary_sensor.pit_boss_cook_active"
     )
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_migrate_entry_defers_when_smoker_is_unreachable(
+    hass: HomeAssistant,
+) -> None:
+    """An offline smoker should not leave the entry in MIGRATION_ERROR."""
+
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Pit Boss",
+        data={"host": "192.0.2.10"},
+        unique_id="PBL-0F78550",
+        minor_version=1,
+    )
+    config_entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.pitboss._async_fetch_device_info",
+        side_effect=TimeoutError,
+    ):
+        assert await async_migrate_entry(hass, config_entry)
+        assert not await hass.config_entries.async_setup(config_entry.entry_id)
+
+    assert config_entry.minor_version == 1
+    assert config_entry.unique_id == "PBL-0F78550"
+    assert config_entry.state is ConfigEntryState.SETUP_RETRY

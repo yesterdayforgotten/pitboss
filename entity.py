@@ -52,9 +52,7 @@ class PitbossEntity(CoordinatorEntity[PitbossDataUpdateCoordinator]):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, registry_device_id)},
             manufacturer="Pit Boss",
-            model=device_info.get(INFO_MODEL_ID),
-            model_id=device_info.get(INFO_MODEL_ID),
-            serial_number=mac_address,
+            serial_number=device_info.get(INFO_MODEL_ID) or mac_address,
             sw_version=device_info.get(INFO_FW_VERSION),
             hw_version=device_info.get(INFO_MG_VERSION),
             configuration_url=None if host is None else f"http://{host}",

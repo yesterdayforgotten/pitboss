@@ -1,0 +1,107 @@
+blueprint:
+  name: Pit Boss cook alerts
+  description: >-
+    Send phone notifications from a Pit Boss smoker: probe done, stall
+    started or ended, smoker temperature off target (flameout or empty hopper),
+    controller errors, and cook start and finish. Choose which alerts you want.
+  domain: automation
+  source_url: https://github.com/yesterdayforgotten/pitboss/blob/main/blueprints/automation/pitboss/cook_alerts.yaml
+  input:
+    smoker:
+      name: Smoker
+      description: The Pit Boss smoker to watch.
+      selector:
+        device:
+          filter:
+            - integration: pitboss
+    notify_device:
+      name: Phone
+      description: Device running the Home Assistant companion app.
+      selector:
+        device:
+          filter:
+            - integration: mobile_app
+    alerts:
+      name: Alerts
+      description: Which events send a notification.
+      default:
+        - probe_done
+        - grill_temp_alert
+        - grill_temp_recovered
+        - error
+      selector:
+        select:
+          multiple: true
+          options:
+            - label: Probe reached target
+              value: probe_done
+            - label: Smoker temperature off target
+              value: grill_temp_alert
+            - label: Smoker temperature back on target
+              value: grill_temp_recovered
+            - label: Controller error
+              value: error
+            - label: Stall started
+              value: stall_started
+            - label: Stall ended
+              value: stall_ended
+            - label: Cook started (probe 1 in for an hour)
+              value: cook_started
+            - label: Cook finished
+              value: cook_ended
+
+mode: queued
+max: 10
+
+trigger:
+  - platform: event
+    event_type: pitboss_event
+    event_data:
+      device_id: !input smoker
+
+variables:
+  alerts: !input alerts
+  event: "{{ trigger.event.data }}"
+  unit: "°{{ event.unit }}"
+  probe_name: "Probe {{ event.probe }}"
+  title: >-
+    {% set titles = {
+      'probe_done': probe_name ~ ' is done',
+      'grill_temp_alert': 'Smoker temperature ' ~ ('dropping' if event.direction == 'low' else 'too high'),
+      'grill_temp_recovered': 'Smoker back on target',
+      'error': 'Smoker error',
+      'stall_started': probe_name ~ ' stalled',
+      'stall_ended': probe_name ~ ' stall is over',
+      'cook_started': 'Cook started',
+      'cook_ended': 'Cook finished',
+    } %}
+    {{ titles.get(event.type, 'Pit Boss') }}
+  message: >-
+    {% if event.type == 'probe_done' %}
+      {{ probe_name }} is at {{ event.temperature }}{{ unit }} (target {{ event.target }}{{ unit }}).
+    {% elif event.type == 'grill_temp_alert' %}
+      Smoker is at {{ event.temperature }}{{ unit }} but set to {{ event.target }}{{ unit }}.
+      {{ 'The fire may be out or the hopper empty.' if event.direction == 'low' else '' }}
+    {% elif event.type == 'grill_temp_recovered' %}
+      Smoker is back at {{ event.temperature }}{{ unit }} (set to {{ event.target }}{{ unit }}).
+    {% elif event.type == 'error' %}
+      {{ event.message }}
+    {% elif event.type in ['stall_started', 'stall_ended'] %}
+      {{ probe_name }} is at {{ event.temperature }}{{ unit }}.
+    {% elif event.type == 'cook_ended' %}
+      {{ event.title ~ ' finished' if event.title else 'Cook finished' }} after
+      {{ (event.duration_minutes // 60) }}h {{ event.duration_minutes % 60 }}m.
+    {% else %}
+      Probe 1 has been in for an hour; the cook is being recorded.
+    {% endif %}
+
+condition:
+  - condition: template
+    value_template: "{{ event.type in alerts }}"
+
+action:
+  - domain: mobile_app
+    type: notify
+    device_id: !input notify_device
+    title: "{{ title }}"
+    message: "{{ message | trim }}"

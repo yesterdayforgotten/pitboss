@@ -5,9 +5,10 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 
-from .const import DOMAIN
+from .const import COOK_ANNOTATION_TEXT_FIELDS, DOMAIN
 from .coordinator import PitbossDataUpdateCoordinator
 
 
@@ -19,6 +20,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_cook)
     websocket_api.async_register_command(hass, ws_update_cook_annotations)
     websocket_api.async_register_command(hass, ws_delete_cook)
+    websocket_api.async_register_command(hass, ws_subscribe_live)
 
 
 def _get_coordinator(
@@ -27,8 +29,10 @@ def _get_coordinator(
     """Return a loaded Pit Boss coordinator by config entry id."""
 
     if (
-        entry := hass.config_entries.async_get_entry(config_entry_id)
-    ) is None or entry.domain != DOMAIN:
+        (entry := hass.config_entries.async_get_entry(config_entry_id)) is None
+        or entry.domain != DOMAIN
+        or entry.state is not ConfigEntryState.LOADED
+    ):
         return None
 
     return entry.runtime_data
@@ -62,7 +66,7 @@ async def ws_list_cooks(
     else:
         cooks = []
         for entry in hass.config_entries.async_entries(DOMAIN):
-            if entry.runtime_data is None:
+            if entry.state is not ConfigEntryState.LOADED:
                 continue
             cooks.extend(entry.runtime_data.list_cooks())
 
@@ -113,7 +117,10 @@ async def ws_get_cook(
         vol.Required("config_entry_id"): str,
         vol.Required("cook_id"): str,
         vol.Optional("tags"): [str],
-        vol.Optional("notes"): vol.Any(str, None),
+        **{
+            vol.Optional(field): vol.Any(str, None)
+            for field in COOK_ANNOTATION_TEXT_FIELDS
+        },
     }
 )
 @websocket_api.async_response
@@ -122,7 +129,7 @@ async def ws_update_cook_annotations(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Update the mutable notes and tags for a completed cook."""
+    """Update the editable details of a completed or in-progress cook."""
 
     if (coordinator := _get_coordinator(hass, msg["config_entry_id"])) is None:
         connection.send_error(
@@ -132,19 +139,26 @@ async def ws_update_cook_annotations(
         )
         return
 
-    if not ({"tags", "notes"} & msg.keys()):
+    editable_fields = {"tags", *COOK_ANNOTATION_TEXT_FIELDS}
+    if not (editable_fields & msg.keys()):
         connection.send_error(
             msg["id"],
             websocket_api.ERR_INVALID_FORMAT,
-            "At least one of tags or notes must be provided",
+            f"At least one of {', '.join(sorted(editable_fields))} must be provided",
         )
         return
 
+    details = {
+        field: msg[field]
+        for field in COOK_ANNOTATION_TEXT_FIELDS
+        if field != "notes" and field in msg
+    }
     if (
         updated_cook := await coordinator.async_update_cook_annotations(
             msg["cook_id"],
             tags=msg.get("tags"),
             notes=msg["notes"] if "notes" in msg else ...,
+            **details,
         )
     ) is None:
         connection.send_error(
@@ -190,3 +204,39 @@ async def ws_delete_cook(
         return
 
     connection.send_result(msg["id"], {"cook_id": msg["cook_id"]})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "pitboss/subscribe_live",
+        vol.Required("config_entry_id"): str,
+    }
+)
+@callback
+def ws_subscribe_live(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Stream live readings and the in-progress cook after every poll."""
+
+    if (coordinator := _get_coordinator(hass, msg["config_entry_id"])) is None:
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_NOT_FOUND,
+            f"Pit Boss config entry {msg['config_entry_id']} was not found",
+        )
+        return
+
+    @callback
+    def _send_snapshot() -> None:
+        connection.send_message(
+            websocket_api.event_message(msg["id"], coordinator.get_live_snapshot())
+        )
+
+    connection.subscriptions[msg["id"]] = coordinator.async_add_listener(
+        _send_snapshot
+    )
+    connection.send_result(msg["id"])
+    _send_snapshot()

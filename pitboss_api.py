@@ -6,11 +6,12 @@ import re
 from struct import error as StructError, unpack
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 
 from homeassistant.helpers.device_registry import format_mac
 
 from .const import (
+    ERROR_DESCRIPTIONS,
     INFO_APP,
     INFO_FS_FREE,
     INFO_FS_SIZE,
@@ -34,6 +35,20 @@ TEMP_NA = 960
 REQUEST_TIMEOUT = ClientTimeout(total=10)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def error_codes(error_str: str) -> list[str]:
+    """Split the space-separated ErrorStr state value into error flag names."""
+
+    return str(error_str or "").split()
+
+
+def describe_errors(error_str: str) -> str:
+    """Return plain-language text for the active error flags in ErrorStr."""
+
+    return "; ".join(
+        ERROR_DESCRIPTIONS.get(code, code) for code in error_codes(error_str)
+    )
 
 
 class PitbossApi:
@@ -152,7 +167,7 @@ class PitbossApi:
     def temp2hex(val: int) -> str:
         """Encode a temperature integer to the protocol hex payload format."""
 
-        temp = f"{val:3d}"
+        temp = f"{val:03d}"
         return re.sub(r"(\d)(\d)(\d)", r"0\g<1>0\g<2>0\g<3>", temp)
 
     def __init__(self, host: str, session: ClientSession) -> None:
@@ -262,6 +277,8 @@ class PitbossApi:
             "Sys.GetInfo",
             timeout=timeout or REQUEST_TIMEOUT,
         )
+        if not isinstance(info, dict):
+            raise ValueError("Pit Boss info response was not a JSON object")
         device_info = self.normalize_device_info(info)
         unique_id = device_info[INFO_MAC]
         if not unique_id:
@@ -271,6 +288,21 @@ class PitbossApi:
             raise ValueError("Pit Boss info response did not include a device model")
         self._device_info = device_info
         return dict(self._device_info)
+
+    async def async_is_pitboss(self, *, timeout: ClientTimeout | None = None) -> bool:
+        """Return True if the host exposes the Pit Boss controller RPC.
+
+        Sys.GetInfo's id is unique per controller, so it can't identify the
+        product. Other Mongoose OS devices answer Sys.GetInfo but not PB.*.
+        """
+
+        try:
+            payload = await self._request_json(
+                "get", "PB.GetState", timeout=timeout or REQUEST_TIMEOUT
+            )
+        except ClientResponseError:
+            return False
+        return isinstance(payload, dict)
 
     def set_device_info(self, device_info: dict[str, Any]) -> None:
         """Seed the cached normalized device info."""

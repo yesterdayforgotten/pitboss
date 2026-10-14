@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 from datetime import datetime, timedelta
+import json
 from unittest.mock import AsyncMock
 
 from freezegun.api import FrozenDateTimeFactory
@@ -10,18 +11,27 @@ import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.util.dt import utcnow
 
-from tests.common import MockConfigEntry, async_fire_time_changed
+from tests.common import (
+    MockConfigEntry,
+    async_capture_events,
+    async_fire_time_changed,
+)
 
 from custom_components.pitboss.const import (
     COOK_CONFIRMATION_WINDOW,
     COOK_END_GRACE_PERIOD,
     DONE_CONFIRMATION_WINDOW,
     DOMAIN,
+    EVENT_PITBOSS,
+    GRILL_ALERT_DURATION,
     STALL_CONFIRMATION_WINDOW,
     TEMPERATURE_TREND_WINDOW,
 )
 from custom_components.pitboss.binary_sensor import PitbossCookActiveBinarySensor
-from custom_components.pitboss.coordinator import PitbossDataUpdateCoordinator
+from custom_components.pitboss.coordinator import (
+    PitbossDataUpdateCoordinator,
+    async_remove_cook_storage,
+)
 from custom_components.pitboss.sensor import (
     PitbossCurrentCookDurationSensor,
     PitbossLastCookDurationSensor,
@@ -42,6 +52,7 @@ class FakePitbossApi:
             "GrillSetTemp": 0,
             "GrillActTemp": 0,
             "IsFarenheit": True,
+            "PowerOn": False,
             "Error": False,
             "ErrorStr": "",
         }
@@ -438,6 +449,8 @@ async def test_async_initialize_restores_active_cook_runtime_history(
 
     assert coordinator._previous_probe1_stall is True
     assert coordinator.is_probe_stalled("P1ActTemp") is True
+    assert len(coordinator._temperature_history["GrillActTemp"]) == 3
+    assert coordinator.get_temperature_change_rate("GrillActTemp") == 0.0
 
 
 async def test_async_initialize_restores_open_device_error_range(
@@ -595,6 +608,10 @@ async def test_update_cook_annotations_only_changes_mutable_fields(
     assert updated is not None
     assert updated["annotations"] == {
         "tags": ["brisket", "overnight"],
+        "title": None,
+        "food": None,
+        "weight": None,
+        "pellets": None,
         "notes": "wrapped at 165F",
     }
     assert updated["start"] == start.isoformat()
@@ -638,7 +655,7 @@ async def test_async_get_cook_returns_saved_stall_samples_and_errors(
         {
             "timestamp": (stall_start + STALL_CONFIRMATION_WINDOW).isoformat(),
             "source": "device",
-            "message": "NoPellets",
+            "message": "Out of pellets",
             "end_timestamp": probe_removed_at.isoformat(),
         }
     ]
@@ -678,7 +695,7 @@ async def test_device_error_range_closes_without_duplicate_when_update_error_occ
         {
             "timestamp": device_error_at.isoformat(),
             "source": "device",
-            "message": "NoPellets",
+            "message": "Out of pellets",
             "end_timestamp": probe_removed_at.isoformat(),
         },
         {
@@ -759,3 +776,284 @@ def test_cook_active_binary_sensor_reflects_confirmation_and_completion(
     )
 
     assert sensor.is_on is False
+
+
+def test_unplugged_probe_resets_temperature_history(
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """A 0 reading means unplugged and must not be treated as a temperature."""
+
+    start = utcnow()
+    coordinator.api._state["P1ActTemp"] = 150
+    coordinator._record_temperature_history(start)
+    coordinator.api._state["P1ActTemp"] = 0
+    coordinator._record_temperature_history(start + timedelta(minutes=1))
+
+    assert len(coordinator._temperature_history["P1ActTemp"]) == 0
+    assert coordinator.get_temperature_change_rate("P1ActTemp") is None
+
+
+async def test_shutdown_flushes_delayed_cook_saves(
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """Unloading must write pending data so a reload never reads stale files."""
+
+    coordinator._store.async_save = AsyncMock()
+    coordinator._schedule_store_save()
+
+    await coordinator.async_shutdown()
+
+    coordinator._store.async_save.assert_awaited_once()
+    coordinator._store.async_save.reset_mock()
+    await coordinator.async_flush_storage()
+    coordinator._store.async_save.assert_not_awaited()
+
+
+async def test_remove_cook_storage_deletes_index_and_details(
+    hass: HomeAssistant,
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """Removing an entry deletes the archive index and every cook detail file."""
+
+    entry_id = coordinator.config_entry.entry_id
+    await coordinator._store.async_save(
+        {"sessions": [{"id": "cook-1"}], "active_session": None}
+    )
+    detail_store = coordinator._get_cook_detail_store("cook-1")
+    await detail_store.async_save({"id": "cook-1", "samples": [], "errors": []})
+
+    await async_remove_cook_storage(hass, entry_id)
+
+    assert await coordinator._store.async_load() is None
+    assert await detail_store.async_load() is None
+
+
+def test_probe_eta_extrapolates_recent_trend(
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """The ETA extends the recent rate of rise to the probe target."""
+
+    start = utcnow().replace(second=0, microsecond=0)
+    coordinator.api._state["P1SetTemp"] = 200
+    _record_probe1_history(
+        coordinator, start, [(timedelta(0), 150), (timedelta(minutes=15), 160)]
+    )
+
+    # 40 degrees/hour with 40 degrees to go.
+    assert coordinator.get_probe_eta("P1ActTemp", "P1SetTemp") == start + timedelta(
+        minutes=75
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "entries"),
+    [
+        (0, [(timedelta(0), 150), (timedelta(minutes=15), 160)]),
+        (200, [(timedelta(0), 150), (timedelta(minutes=5), 155)]),
+        (200, [(timedelta(0), 160), (timedelta(minutes=20), 160)]),
+        (200, [(timedelta(0), 195), (timedelta(minutes=15), 201)]),
+    ],
+    ids=["no-target", "short-history", "stalled", "already-there"],
+)
+def test_probe_eta_is_unknown_when_it_cannot_be_estimated(
+    coordinator: PitbossDataUpdateCoordinator,
+    target: int,
+    entries: list[tuple[timedelta, int]],
+) -> None:
+    """No ETA without a target, enough history, or a rising temperature."""
+
+    coordinator.api._state["P1SetTemp"] = target
+    _record_probe1_history(coordinator, utcnow(), entries)
+
+    assert coordinator.get_probe_eta("P1ActTemp", "P1SetTemp") is None
+
+
+async def test_probe_done_event_fires_once(
+    hass: HomeAssistant,
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """A probe reaching its target is announced once, not on every poll."""
+
+    events = async_capture_events(hass, EVENT_PITBOSS)
+    start = utcnow()
+    coordinator.api._state["P1SetTemp"] = 200
+    _record_probe1_history(
+        coordinator,
+        start,
+        [(timedelta(0), 201), (DONE_CONFIRMATION_WINDOW, 202)],
+    )
+
+    coordinator._update_notifications(start + DONE_CONFIRMATION_WINDOW)
+    coordinator._update_notifications(
+        start + DONE_CONFIRMATION_WINDOW + timedelta(minutes=1)
+    )
+    await hass.async_block_till_done()
+
+    assert [event.data["type"] for event in events] == ["probe_done"]
+    assert events[0].data["probe"] == 1
+    assert events[0].data["temperature"] == 202
+    assert events[0].data["target"] == 200
+    assert events[0].data["unit"] == "F"
+    assert events[0].data["config_entry_id"] == coordinator.config_entry.entry_id
+
+
+async def test_error_event_fires_for_each_new_error(
+    hass: HomeAssistant,
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """Each newly raised controller error is announced in plain language."""
+
+    events = async_capture_events(hass, EVENT_PITBOSS)
+    start = utcnow()
+    coordinator.api._state["Error"] = True
+    coordinator.api._state["ErrorStr"] = "NoPellets"
+    coordinator._update_notifications(start)
+    coordinator._update_notifications(start + timedelta(minutes=1))
+    coordinator.api._state["ErrorStr"] = "NoPellets FanErr"
+    coordinator._update_notifications(start + timedelta(minutes=2))
+    await hass.async_block_till_done()
+
+    assert [(event.data["codes"], event.data["message"]) for event in events] == [
+        (["NoPellets"], "Out of pellets"),
+        (["FanErr"], "Combustion fan fault"),
+    ]
+
+
+async def test_grill_temperature_alert_needs_setpoint_reached_first(
+    hass: HomeAssistant,
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """Warm-up never alerts; a sustained drop after reaching setpoint does."""
+
+    events = async_capture_events(hass, EVENT_PITBOSS)
+    state = coordinator.api._state
+    start = utcnow()
+    state.update(PowerOn=True, GrillSetTemp=225, GrillActTemp=100)
+
+    coordinator._update_notifications(start)
+    coordinator._update_notifications(start + GRILL_ALERT_DURATION * 3)
+    assert coordinator.is_grill_temperature_alert() is False
+
+    state["GrillActTemp"] = 220
+    coordinator._update_notifications(start + timedelta(hours=1))
+
+    dropped_at = start + timedelta(hours=2)
+    state["GrillActTemp"] = 180
+    coordinator._update_notifications(dropped_at)
+    coordinator._update_notifications(
+        dropped_at + GRILL_ALERT_DURATION - timedelta(seconds=1)
+    )
+    assert coordinator.is_grill_temperature_alert() is False
+
+    coordinator._update_notifications(dropped_at + GRILL_ALERT_DURATION)
+    assert coordinator.is_grill_temperature_alert() is True
+
+    state["GrillActTemp"] = 222
+    coordinator._update_notifications(
+        dropped_at + GRILL_ALERT_DURATION + timedelta(minutes=1)
+    )
+    assert coordinator.is_grill_temperature_alert() is False
+    await hass.async_block_till_done()
+
+    assert [event.data["type"] for event in events] == [
+        "grill_temp_alert",
+        "grill_temp_recovered",
+    ]
+    assert events[0].data["direction"] == "low"
+    assert events[0].data["temperature"] == 180
+    assert events[0].data["target"] == 225
+
+
+def test_grill_temperature_alert_rearms_on_new_setpoint(
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """Changing the setpoint clears the alert and waits for the new target."""
+
+    state = coordinator.api._state
+    start = utcnow()
+    state.update(PowerOn=True, GrillSetTemp=225, GrillActTemp=225)
+    coordinator._update_notifications(start)
+    state["GrillActTemp"] = 150
+    coordinator._update_notifications(start + timedelta(minutes=1))
+    coordinator._update_notifications(start + timedelta(minutes=1) + GRILL_ALERT_DURATION)
+    assert coordinator.is_grill_temperature_alert() is True
+
+    state["GrillSetTemp"] = 300
+    coordinator._update_notifications(start + timedelta(hours=1))
+    coordinator._update_notifications(start + timedelta(hours=2))
+    assert coordinator.is_grill_temperature_alert() is False
+
+
+async def test_active_cook_details_carry_into_the_archive(
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """Details entered while cooking are kept when the cook is archived."""
+
+    start = utcnow()
+    coordinator.api._state["P1ActTemp"] = 165
+    coordinator._update_cook_tracking(start)
+
+    updated = await coordinator.async_update_cook_annotations(
+        start.isoformat(),
+        title=" Saturday brisket ",
+        food="Brisket",
+        weight="x" * 100,
+        notes=...,
+    )
+
+    assert updated is not None
+    assert updated["annotations"]["title"] == "Saturday brisket"
+    assert updated["annotations"]["food"] == "Brisket"
+    assert updated["annotations"]["weight"] == "x" * 40
+    assert updated["annotations"]["pellets"] is None
+
+    coordinator._update_cook_tracking(start + COOK_CONFIRMATION_WINDOW)
+    probe_removed_at = start + COOK_CONFIRMATION_WINDOW + timedelta(minutes=10)
+    coordinator.api._state["P1ActTemp"] = 0
+    coordinator._update_cook_tracking(probe_removed_at)
+    coordinator._update_cook_tracking(probe_removed_at + COOK_END_GRACE_PERIOD)
+
+    assert coordinator.list_cooks()[0]["annotations"]["title"] == "Saturday brisket"
+
+
+async def test_update_cook_annotations_rejects_unknown_fields(
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """Only the known detail fields can be written."""
+
+    start = utcnow()
+    _complete_confirmed_cook(coordinator, start)
+
+    with pytest.raises(TypeError):
+        await coordinator.async_update_cook_annotations(
+            start.isoformat(), colour="red"
+        )
+
+
+def test_live_snapshot_reports_readings_and_active_cook(
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """The panel's live feed carries readings plus the in-progress cook."""
+
+    start = utcnow()
+    coordinator.api._state.update(
+        PowerOn=True, GrillSetTemp=225, GrillActTemp=220, P1ActTemp=165
+    )
+    coordinator._update_cook_tracking(start)
+
+    snapshot = coordinator.get_live_snapshot()
+
+    json.dumps(snapshot)
+    assert snapshot["power"] is True
+    assert snapshot["grill"] == {
+        "actual": 220,
+        "target": 225,
+        "rate": None,
+        "alert": False,
+    }
+    assert snapshot["probe1"]["actual"] == 165
+    assert snapshot["probe2"]["actual"] is None
+    assert snapshot["error"] is None
+    assert snapshot["cook"]["id"] == start.isoformat()
+    assert snapshot["cook"]["confirmed"] is False
+    assert len(snapshot["cook"]["samples"]) == 1

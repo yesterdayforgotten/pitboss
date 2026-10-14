@@ -79,7 +79,7 @@ def _load_source_entity_ids(data: dict[str, str]) -> list[str]:
 
     try:
         source_entity_ids = json.loads(data[_SOURCE_ENTITY_IDS_KEY])
-    except KeyError, TypeError, json.JSONDecodeError:
+    except (KeyError, TypeError, json.JSONDecodeError):
         return []
 
     if not isinstance(source_entity_ids, list):

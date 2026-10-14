@@ -30,7 +30,6 @@ DEFAULT_NAME = "Pit Boss"
 DEFAULT_SCAN_INTERVAL = 15  # seconds
 DISCOVERY_PARALLELISM = 32
 DISCOVERY_TIMEOUT_SECONDS = 1
-SUPPORTED_MODEL_IDS = {"PBL-0F78550"}
 COOK_CONFIRMATION_WINDOW = timedelta(hours=1)
 COOK_END_GRACE_PERIOD = timedelta(minutes=30)
 COOK_SAMPLE_INTERVAL = timedelta(minutes=5)
@@ -38,6 +37,12 @@ COOK_STORAGE_SAVE_DELAY = 30
 COOK_STORAGE_VERSION = 2
 COOK_DETAIL_STORAGE_VERSION = 1
 DONE_CONFIRMATION_WINDOW = timedelta(minutes=5)
+ETA_MAXIMUM = timedelta(hours=24)
+ETA_MINIMUM_HISTORY = timedelta(minutes=10)
+EVENT_PITBOSS = "pitboss_event"
+GRILL_ALERT_DURATION = timedelta(minutes=10)
+GRILL_ALERT_THRESHOLD_C = 15
+GRILL_ALERT_THRESHOLD_F = 25
 STALL_CONFIRMATION_WINDOW = timedelta(minutes=20)
 STALL_MINIMUM_TEMPERATURE_C = 60
 STALL_MINIMUM_TEMPERATURE_F = 140
@@ -46,6 +51,28 @@ TEMPERATURE_TREND_INTERVAL = timedelta(hours=1)
 TEMPERATURE_TREND_WINDOW = timedelta(minutes=30)
 TEMPERATURE_COMMAND_DEBOUNCE = 0.75
 UPDATE_INTERVAL = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+
+# Free-text cook details editable from the archive panel, with length limits.
+COOK_ANNOTATION_TEXT_FIELDS: dict[str, int] = {
+    "title": 120,
+    "food": 120,
+    "weight": 40,
+    "pellets": 120,
+    "notes": 10000,
+}
+
+# Plain-language descriptions of the controller's error flags (ErrorStr names).
+ERROR_DESCRIPTIONS: dict[str, str] = {
+    "Err1": "Error 1: grill temperature sensor fault",
+    "Err2": "Error 2: controller fault",
+    "Err3": "Error 3: controller fault",
+    "HighTempErr": "Grill is too hot (high-temperature error)",
+    "FanErr": "Combustion fan fault",
+    "HotErr": "Grill was hot at power-on (hot-start error)",
+    "MotorErr": "Auger motor fault",
+    "NoPellets": "Out of pellets",
+    "ErL": "Fire went out or failed to ignite (low-temperature error)",
+}
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,

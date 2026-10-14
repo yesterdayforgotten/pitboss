@@ -13,6 +13,7 @@ from aiohttp import ClientError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import (
@@ -22,15 +23,24 @@ from homeassistant.helpers.update_coordinator import (
 from homeassistant.util.dt import utcnow
 
 from .const import (
+    COOK_ANNOTATION_TEXT_FIELDS,
     COOK_CONFIRMATION_WINDOW,
     COOK_DETAIL_STORAGE_VERSION,
     COOK_END_GRACE_PERIOD,
     COOK_SAMPLE_INTERVAL,
     COOK_STORAGE_SAVE_DELAY,
     COOK_STORAGE_VERSION,
+    DATA_DEVICE_INFO,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     DONE_CONFIRMATION_WINDOW,
+    ETA_MAXIMUM,
+    ETA_MINIMUM_HISTORY,
+    EVENT_PITBOSS,
+    GRILL_ALERT_DURATION,
+    GRILL_ALERT_THRESHOLD_C,
+    GRILL_ALERT_THRESHOLD_F,
+    INFO_MAC,
     STALL_CONFIRMATION_WINDOW,
     STALL_MINIMUM_TEMPERATURE_C,
     STALL_MINIMUM_TEMPERATURE_F,
@@ -38,7 +48,7 @@ from .const import (
     TEMPERATURE_TREND_INTERVAL,
     TEMPERATURE_TREND_WINDOW,
 )
-from .pitboss_api import PitbossApi
+from .pitboss_api import PitbossApi, describe_errors, error_codes
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,7 +62,17 @@ type CookSession = dict[str, Any]
 def _default_cook_annotations() -> CookAnnotations:
     """Return default mutable cook annotations."""
 
-    return {"tags": [], "notes": None}
+    return {"tags": [], **dict.fromkeys(COOK_ANNOTATION_TEXT_FIELDS)}
+
+
+def _copy_cook_annotations(annotations: dict[str, Any] | None) -> CookAnnotations:
+    """Return a detached copy of cook annotations with every field present."""
+
+    annotations = annotations or {}
+    return {
+        "tags": list(annotations.get("tags", [])),
+        **{field: annotations.get(field) for field in COOK_ANNOTATION_TEXT_FIELDS},
+    }
 
 
 def _default_cook_summary_metrics() -> dict[str, Any]:
@@ -115,6 +135,37 @@ class PitbossCookIndexStore(Store[dict[str, Any]]):
         raise NotImplementedError
 
 
+def _cook_index_store(hass: HomeAssistant, entry_id: str) -> PitbossCookIndexStore:
+    """Return the cook archive index store for a config entry."""
+
+    return PitbossCookIndexStore(
+        hass, COOK_STORAGE_VERSION, f"{DOMAIN}_{entry_id}_cook_sessions"
+    )
+
+
+def _cook_detail_store(
+    hass: HomeAssistant, entry_id: str, cook_id: str
+) -> Store[dict[str, Any]]:
+    """Return the sampled-detail store for one completed cook."""
+
+    cook_hash = hashlib.sha1(cook_id.encode(), usedforsecurity=False).hexdigest()
+    return Store(
+        hass,
+        COOK_DETAIL_STORAGE_VERSION,
+        f"{DOMAIN}_{entry_id}_cook_detail_{cook_hash}",
+    )
+
+
+async def async_remove_cook_storage(hass: HomeAssistant, entry_id: str) -> None:
+    """Delete every cook archive file belonging to a removed config entry."""
+
+    index_store = _cook_index_store(hass, entry_id)
+    stored_data = await index_store.async_load() or {}
+    for session in stored_data.get("sessions", []):
+        await _cook_detail_store(hass, entry_id, session["id"]).async_remove()
+    await index_store.async_remove()
+
+
 class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
     """Class to manage fetching Pitboss data."""
 
@@ -133,17 +184,17 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         super().__init__(
             hass=hass,
             logger=_LOGGER,
+            config_entry=config_entry,
             name=DOMAIN,
             update_interval=timedelta(seconds=interval_seconds),
         )
         self.api = api
-        self.config_entry = config_entry
-        self._store: Store[dict[str, Any]] = PitbossCookIndexStore(
-            hass,
-            COOK_STORAGE_VERSION,
-            f"{DOMAIN}_{config_entry.entry_id}_cook_sessions",
+        self._store: Store[dict[str, Any]] = _cook_index_store(
+            hass, config_entry.entry_id
         )
         self._cook_detail_stores: dict[str, Store[dict[str, Any]]] = {}
+        self._pending_detail_saves: dict[str, CookSession] = {}
+        self._store_save_pending = False
         self._command_lock = asyncio.Lock()
         self._debounced_commands: dict[
             str, tuple[Callable[[], Awaitable[None]], Callable[[], None]]
@@ -165,6 +216,15 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         self._previous_probe1_stall = False
         self._active_device_error_message: str | None = None
         self._last_update_error_message: str | None = None
+        # Edge-detection state for pitboss_event notifications.
+        self._probe_done_notified = {"P1ActTemp": False, "P2ActTemp": False}
+        self._probe_stall_notified = {"P1ActTemp": False, "P2ActTemp": False}
+        self._notified_error_codes: list[str] = []
+        # Smoker temperature alert: only armed once the smoker reaches its setpoint.
+        self._grill_alert_setpoint: int | None = None
+        self._grill_reached_setpoint = False
+        self._grill_off_target_since: datetime | None = None
+        self._grill_alert_active = False
 
     async def async_initialize(self) -> None:
         """Load persisted cook session data."""
@@ -195,6 +255,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             self._record_temperature_history(now)
             self._update_probe_target_reached_times(now)
             self._update_cook_tracking(now)
+            self._update_notifications(now)
         except (ClientError, TimeoutError) as ex:
             detail = str(ex) or type(ex).__name__
             message = f"Communication error while updating Pit Boss state: {detail}"
@@ -278,7 +339,11 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
 
         cutoff = timestamp - TEMPERATURE_TREND_WINDOW
         for key, history in self._temperature_history.items():
-            history.append((timestamp, int(self.api.get_state_value(key))))
+            # 0 means the probe is unplugged; a gap must restart the trend.
+            if (temperature := int(self.api.get_state_value(key))) <= 0:
+                history.clear()
+                continue
+            history.append((timestamp, temperature))
             while history and history[0][0] < cutoff:
                 history.popleft()
 
@@ -386,6 +451,38 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
 
         return all(temp >= target for timestamp, temp in history if timestamp >= cutoff)
 
+    def get_probe_eta(self, actual_key: str, target_key: str) -> datetime | None:
+        """Estimate when a probe reaches its target from its recent trend.
+
+        Returns None when there is no target, the probe is already there, the
+        trend is too short to trust, or the probe is stalled or cooling.
+        """
+
+        if (target := self.get_probe_target_temperature(target_key)) is None:
+            return None
+
+        history = self._temperature_history[actual_key]
+        if not history or history[-1][0] - history[0][0] < ETA_MINIMUM_HISTORY:
+            return None
+
+        latest_time, latest_temperature = history[-1]
+        if (remaining := target - latest_temperature) <= 0:
+            return None
+
+        rate = self.get_temperature_change_rate(actual_key)
+        if rate is None or rate <= STALL_TREND_THRESHOLD:
+            return None
+
+        time_to_target = timedelta(hours=remaining / rate)
+        if time_to_target > ETA_MAXIMUM:
+            return None
+        return (latest_time + time_to_target).replace(second=0, microsecond=0)
+
+    def is_grill_temperature_alert(self) -> bool:
+        """Return if the smoker has been far from its setpoint for too long."""
+
+        return self._grill_alert_active
+
     def get_time_since_target_reached(self, target_key: str) -> timedelta | None:
         """Return how long the probe has been at or above its target."""
 
@@ -437,6 +534,62 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             for session in reversed(self._cook_sessions)
         ]
 
+    def get_live_snapshot(self) -> dict[str, Any]:
+        """Return current readings plus the in-progress cook for the panel."""
+
+        def probe(actual_key: str, target_key: str) -> dict[str, Any]:
+            actual = int(self.api.get_state_value(actual_key))
+            eta = self.get_probe_eta(actual_key, target_key)
+            return {
+                "actual": actual if actual > 0 else None,
+                "target": self.get_probe_target_temperature(target_key),
+                "rate": self.get_temperature_change_rate(actual_key),
+                "eta": None if eta is None else eta.isoformat(),
+                "stalled": self.is_probe_stalled(actual_key),
+                "done": self.is_probe_done(actual_key, target_key),
+            }
+
+        error_text = (
+            describe_errors(self.api.get_state_value("ErrorStr"))
+            if self.api.get_state_value("Error")
+            else None
+        )
+        active_cook = self._active_cook
+        return {
+            "config_entry_id": self.config_entry.entry_id,
+            "online": self.last_update_success,
+            "unit": self._get_temperature_unit(),
+            "power": bool(self.api.get_state_value("PowerOn")),
+            "grill": {
+                "actual": int(self.api.get_state_value("GrillActTemp")) or None,
+                "target": int(self.api.get_state_value("GrillSetTemp")) or None,
+                "rate": self.get_temperature_change_rate("GrillActTemp"),
+                "alert": self._grill_alert_active,
+            },
+            "probe1": probe("P1ActTemp", "P1SetTemp"),
+            "probe2": probe("P2ActTemp", "P2SetTemp"),
+            "error": error_text or None,
+            "cook": (
+                None
+                if active_cook is None
+                else {
+                    **self._serialize_cook_session(
+                        self._cook_summary_from_active_cook(active_cook),
+                        include_config_entry=True,
+                    ),
+                    "confirmed": active_cook["confirmed_start"] is not None,
+                    "samples": [
+                        self._serialize_cook_sample(sample)
+                        for sample in active_cook.get("samples", [])
+                    ],
+                    "errors": [
+                        self._serialize_cook_error(error)
+                        for error in active_cook.get("errors", [])
+                    ],
+                }
+            ),
+        }
+
     async def async_get_cook(self, cook_id: str) -> dict[str, Any] | None:
         """Return a completed cook with its sampled trace."""
 
@@ -458,18 +611,38 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         *,
         tags: list[str] | None = None,
         notes: str | None | object = None,
+        **details: str | None,
     ) -> dict[str, Any] | None:
-        """Update the mutable annotations for a completed cook."""
+        """Update the editable details of a completed or in-progress cook.
 
-        if (session := self._get_cook_session(cook_id)) is None:
+        `details` takes the other COOK_ANNOTATION_TEXT_FIELDS (title, food,
+        weight, pellets); fields that are not passed are left unchanged.
+        """
+
+        if unknown := details.keys() - COOK_ANNOTATION_TEXT_FIELDS.keys():
+            raise TypeError(f"Unknown cook annotation fields: {sorted(unknown)}")
+
+        is_active = self._active_cook is not None and self._active_cook["id"] == cook_id
+        session = self._active_cook if is_active else self._get_cook_session(cook_id)
+        if session is None:
             return None
 
-        if tags is not None:
-            session["annotations"]["tags"] = self._normalize_tags(tags)
         if notes is not ...:
-            session["annotations"]["notes"] = self._normalize_notes(notes)
+            details["notes"] = notes
+        annotations = session["annotations"]
+        if tags is not None:
+            annotations["tags"] = self._normalize_tags(tags)
+        for field, value in details.items():
+            annotations[field] = self._normalize_text(
+                value, COOK_ANNOTATION_TEXT_FIELDS[field]
+            )
 
+        self._store_save_pending = False
         await self._store.async_save(self._serialize_store_data())
+        if is_active:
+            return self._serialize_cook_session(
+                self._cook_summary_from_active_cook(session), include_config_entry=True
+            )
         return self._serialize_cook_session(session, include_config_entry=True)
 
     async def async_delete_cook(self, cook_id: str) -> bool:
@@ -482,12 +655,14 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             session for session in self._cook_sessions if session["id"] != cook_id
         ]
 
+        self._pending_detail_saves.pop(cook_id, None)
         detail_store = self._cook_detail_stores.pop(cook_id, None)
         if detail_store is None:
             detail_store = self._get_cook_detail_store(cook_id)
             self._cook_detail_stores.pop(cook_id, None)
 
         await detail_store.async_remove()
+        self._store_save_pending = False
         await self._store.async_save(self._serialize_store_data())
         self.async_update_listeners()
         return True
@@ -542,6 +717,11 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
                 )
                 entity_state_changed = True
                 store_state_changed = True
+                self._fire_event(
+                    "cook_started",
+                    cook_id=self._active_cook["id"],
+                    start=self._active_cook["start"].isoformat(),
+                )
 
             if self._active_cook["confirmed_start"] is not None:
                 if self._active_cook["done_at"] is None and self.is_probe_done(
@@ -593,6 +773,14 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
                 self._cook_summary_from_active_cook(self._active_cook)
             )
             self._schedule_cook_detail_save(completed_cook)
+            self._fire_event(
+                "cook_ended",
+                cook_id=completed_cook["id"],
+                start=completed_cook["start"].isoformat(),
+                end=cook_end.isoformat(),
+                duration_minutes=round(completed_cook["duration_seconds"] / 60),
+                title=completed_cook["annotations"].get("title"),
+            )
 
         self._active_cook = None
         self._probe1_absent_since = None
@@ -656,6 +844,135 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             "probe1_stalled": self.is_probe_stalled("P1ActTemp"),
         }
 
+    def _device_registry_id(self) -> str | None:
+        """Return the device registry id of this smoker, if registered."""
+
+        identifier = (
+            self.config_entry.data.get(DATA_DEVICE_INFO, {}).get(INFO_MAC)
+            or self.config_entry.unique_id
+            or self.config_entry.entry_id
+        )
+        device = dr.async_get(self.hass).async_get_device(
+            identifiers={(DOMAIN, identifier)}
+        )
+        return None if device is None else device.id
+
+    def _fire_event(self, event_type: str, **data: Any) -> None:
+        """Fire a pitboss_event on the bus for automations and blueprints."""
+
+        self.hass.bus.async_fire(
+            EVENT_PITBOSS,
+            {
+                "type": event_type,
+                "config_entry_id": self.config_entry.entry_id,
+                "device_id": self._device_registry_id(),
+                "unit": self._get_temperature_unit(),
+                **data,
+            },
+        )
+
+    def _update_notifications(self, timestamp: datetime) -> None:
+        """Fire events when probes finish or stall, errors appear, or the fire drifts."""
+
+        for probe, actual_key, target_key in (
+            (1, "P1ActTemp", "P1SetTemp"),
+            (2, "P2ActTemp", "P2SetTemp"),
+        ):
+            done = self.is_probe_done(actual_key, target_key)
+            if done and not self._probe_done_notified[actual_key]:
+                self._fire_event(
+                    "probe_done",
+                    probe=probe,
+                    temperature=int(self.api.get_state_value(actual_key)),
+                    target=self.get_probe_target_temperature(target_key),
+                )
+            self._probe_done_notified[actual_key] = done
+
+            stalled = self.is_probe_stalled(actual_key)
+            if stalled != self._probe_stall_notified[actual_key]:
+                self._fire_event(
+                    "stall_started" if stalled else "stall_ended",
+                    probe=probe,
+                    temperature=int(self.api.get_state_value(actual_key)),
+                )
+            self._probe_stall_notified[actual_key] = stalled
+
+        codes = (
+            error_codes(self.api.get_state_value("ErrorStr"))
+            if self.api.get_state_value("Error")
+            else []
+        )
+        if new_codes := [
+            code for code in codes if code not in self._notified_error_codes
+        ]:
+            self._fire_event(
+                "error",
+                codes=new_codes,
+                message=describe_errors(" ".join(new_codes)),
+            )
+        self._notified_error_codes = codes
+
+        self._update_grill_temperature_alert(timestamp)
+
+    def _update_grill_temperature_alert(self, timestamp: datetime) -> None:
+        """Track the smoker drifting away from its setpoint (flameout, empty hopper)."""
+
+        setpoint = int(self.api.get_state_value("GrillSetTemp"))
+        actual = int(self.api.get_state_value("GrillActTemp"))
+        if not self.api.get_state_value("PowerOn") or setpoint <= 0 or actual <= 0:
+            self._grill_alert_setpoint = None
+            self._grill_reached_setpoint = False
+            self._grill_off_target_since = None
+            if self._grill_alert_active:
+                self._grill_alert_active = False
+                self.async_update_listeners()
+            return
+
+        if setpoint != self._grill_alert_setpoint:
+            # A new setpoint means a new warm-up or cool-down; re-arm from scratch.
+            self._grill_alert_setpoint = setpoint
+            self._grill_reached_setpoint = False
+            self._grill_off_target_since = None
+            if self._grill_alert_active:
+                self._grill_alert_active = False
+                self.async_update_listeners()
+
+        threshold = (
+            GRILL_ALERT_THRESHOLD_F
+            if self.api.is_fahrenheit()
+            else GRILL_ALERT_THRESHOLD_C
+        )
+        on_target = abs(actual - setpoint) <= threshold
+
+        if not self._grill_reached_setpoint:
+            self._grill_reached_setpoint = on_target
+            return
+
+        if on_target:
+            self._grill_off_target_since = None
+            if self._grill_alert_active:
+                self._grill_alert_active = False
+                self.async_update_listeners()
+                self._fire_event(
+                    "grill_temp_recovered", temperature=actual, target=setpoint
+                )
+            return
+
+        if self._grill_off_target_since is None:
+            self._grill_off_target_since = timestamp
+        if (
+            not self._grill_alert_active
+            and timestamp - self._grill_off_target_since >= GRILL_ALERT_DURATION
+        ):
+            self._grill_alert_active = True
+            self.async_update_listeners()
+            self._fire_event(
+                "grill_temp_alert",
+                temperature=actual,
+                target=setpoint,
+                direction="low" if actual < setpoint else "high",
+            )
+
     def _record_cook_error(
         self, timestamp: datetime, source: str, message: str
     ) -> None:
@@ -710,7 +1027,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             self._close_active_device_error(timestamp)
             return
 
-        error_message = str(self.api.get_state_value("ErrorStr")).strip()
+        error_message = describe_errors(self.api.get_state_value("ErrorStr"))
         if not error_message:
             self._close_active_device_error(timestamp)
             return
@@ -771,10 +1088,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             "stall_count": active_cook["stall_count"],
             "unit": active_cook["unit"],
             "summary": dict(active_cook["summary"]),
-            "annotations": {
-                "tags": list(active_cook["annotations"]["tags"]),
-                "notes": active_cook["annotations"]["notes"],
-            },
+            "annotations": _copy_cook_annotations(active_cook["annotations"]),
         }
 
     def _get_cook_session(self, cook_id: str) -> CookSession | None:
@@ -789,13 +1103,8 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         """Return the per-cook detail store for a completed cook."""
 
         if cook_id not in self._cook_detail_stores:
-            cook_hash = hashlib.sha1(
-                cook_id.encode(), usedforsecurity=False
-            ).hexdigest()
-            self._cook_detail_stores[cook_id] = Store(
-                self.hass,
-                COOK_DETAIL_STORAGE_VERSION,
-                f"{DOMAIN}_{self.config_entry.entry_id}_cook_detail_{cook_hash}",
+            self._cook_detail_stores[cook_id] = _cook_detail_store(
+                self.hass, self.config_entry.entry_id, cook_id
             )
 
         return self._cook_detail_stores[cook_id]
@@ -823,6 +1132,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
     def _schedule_cook_detail_save(self, active_cook: CookSession) -> None:
         """Persist sampled detail data for a completed cook."""
 
+        self._pending_detail_saves[active_cook["id"]] = active_cook
         detail_store = self._get_cook_detail_store(active_cook["id"])
         detail_store.async_delay_save(
             lambda: self._serialize_cook_detail(active_cook), COOK_STORAGE_SAVE_DELAY
@@ -900,6 +1210,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             return
 
         self._temperature_history = {
+            "GrillActTemp": deque(),
             "P1ActTemp": deque(),
             "P2ActTemp": deque(),
         }
@@ -916,14 +1227,24 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         for sample in samples:
             if sample["timestamp"] < cutoff:
                 continue
-            self._temperature_history["P1ActTemp"].append(
-                (sample["timestamp"], sample["probe1_actual"])
-            )
-            self._temperature_history["P2ActTemp"].append(
-                (sample["timestamp"], sample["probe2_actual"])
-            )
+            for key, sample_key in (
+                ("GrillActTemp", "grill_actual"),
+                ("P1ActTemp", "probe1_actual"),
+                ("P2ActTemp", "probe2_actual"),
+            ):
+                if sample[sample_key] <= 0:
+                    self._temperature_history[key].clear()
+                else:
+                    self._temperature_history[key].append(
+                        (sample["timestamp"], sample[sample_key])
+                    )
 
         self._previous_probe1_stall = bool(samples[-1].get("probe1_stalled"))
+        # Don't re-announce a stall or a finished probe after a restart.
+        self._probe_stall_notified["P1ActTemp"] = self._previous_probe1_stall
+        self._probe_done_notified["P1ActTemp"] = (
+            self._active_cook.get("done_at") is not None
+        )
         self._active_device_error_message = None
         for error in reversed(self._active_cook.get("errors", [])):
             if error.get("source") == "device" and error.get("end") is None:
@@ -950,20 +1271,47 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
 
         return normalized_tags
 
-    def _normalize_notes(self, notes: str | None | object) -> str | None:
-        """Normalize freeform notes for storage."""
+    def _normalize_text(self, value: str | None | object, max_length: int) -> str | None:
+        """Normalize a free-text cook detail for storage."""
 
-        if notes is None:
+        if value is None:
             return None
-        cleaned = str(notes).strip()
+        cleaned = str(value).strip()[:max_length]
         return cleaned or None
 
     def _schedule_store_save(self) -> None:
         """Persist cook session state with a small write delay."""
 
+        self._store_save_pending = True
         self._store.async_delay_save(
             self._serialize_store_data, COOK_STORAGE_SAVE_DELAY
         )
+
+    async def async_flush_storage(self) -> None:
+        """Write any delayed cook saves now.
+
+        A reload creates a new coordinator that reads the same files. An old
+        delayed write landing after that would clobber newer data (for example
+        resurrecting a deleted cook), so unload must flush first. async_save
+        also cancels the pending delayed write.
+        """
+
+        pending_details = self._pending_detail_saves
+        self._pending_detail_saves = {}
+        for cook_id, cook in pending_details.items():
+            await self._get_cook_detail_store(cook_id).async_save(
+                self._serialize_cook_detail(cook)
+            )
+
+        if self._store_save_pending:
+            self._store_save_pending = False
+            await self._store.async_save(self._serialize_store_data())
+
+    async def async_shutdown(self) -> None:
+        """Cancel polling and flush pending cook data."""
+
+        await super().async_shutdown()
+        await self.async_flush_storage()
 
     def _serialize_store_data(self) -> dict[str, Any]:
         """Return cook session data for storage."""
@@ -997,14 +1345,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
                 None if session["done_at"] is None else session["done_at"].isoformat()
             ),
             "summary": dict(session.get("summary", _default_cook_summary_metrics())),
-            "annotations": {
-                "tags": list(
-                    session.get("annotations", _default_cook_annotations())["tags"]
-                ),
-                "notes": session.get("annotations", _default_cook_annotations())[
-                    "notes"
-                ],
-            },
+            "annotations": _copy_cook_annotations(session.get("annotations")),
             "errors": [
                 self._serialize_cook_error(error) for error in session.get("errors", [])
             ],
@@ -1062,10 +1403,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
                 **_default_cook_summary_metrics(),
                 **session.get("summary", {}),
             },
-            "annotations": {
-                "tags": list(session.get("annotations", {}).get("tags", [])),
-                "notes": session.get("annotations", {}).get("notes"),
-            },
+            "annotations": _copy_cook_annotations(session.get("annotations")),
             "errors": [
                 self._deserialize_cook_error(error)
                 for error in session.get("errors", [])

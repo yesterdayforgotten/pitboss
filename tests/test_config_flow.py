@@ -9,6 +9,8 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
+from tests.common import MockConfigEntry
+
 from custom_components.pitboss.const import DATA_DEVICE_INFO, DOMAIN
 from custom_components.pitboss.config_flow import CONF_SUBNET, UnsupportedModel
 
@@ -212,3 +214,74 @@ async def test_user_flow_rejects_unsupported_model(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "unsupported_model"}
     assert result["description_placeholders"] == {"model": "PBL-12345678"}
+
+
+async def _async_reconfigure(
+    hass: HomeAssistant, config_entry: MockConfigEntry, device_info: dict[str, str]
+):
+    """Run a reconfigure flow that finds the given device at the new host."""
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={
+            "source": config_entries.SOURCE_RECONFIGURE,
+            "entry_id": config_entry.entry_id,
+        },
+    )
+    with (
+        patch(
+            "custom_components.pitboss.config_flow._async_validate_input",
+            return_value=device_info,
+        ),
+        patch("custom_components.pitboss.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={CONF_HOST: "192.0.2.20"},
+        )
+        await hass.async_block_till_done()
+    return result
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_reconfigure_rejects_a_different_smoker(hass: HomeAssistant) -> None:
+    """Pointing an entry at another smoker must not rewrite its identity."""
+
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Pit Boss",
+        data={CONF_HOST: "192.0.2.10"},
+        unique_id="aa:bb:cc:dd:ee:ff",
+        minor_version=2,
+    )
+    config_entry.add_to_hass(hass)
+
+    result = await _async_reconfigure(
+        hass, config_entry, {"model_id": "PBL-OTHER", "mac": "11:22:33:44:55:66"}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "wrong_device"
+    assert config_entry.data[CONF_HOST] == "192.0.2.10"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_reconfigure_updates_host_for_same_smoker(hass: HomeAssistant) -> None:
+    """A new IP for the same smoker is accepted."""
+
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Pit Boss",
+        data={CONF_HOST: "192.0.2.10"},
+        unique_id="aa:bb:cc:dd:ee:ff",
+        minor_version=2,
+    )
+    config_entry.add_to_hass(hass)
+
+    result = await _async_reconfigure(
+        hass, config_entry, {"model_id": "PBL-0F78550", "mac": "aa:bb:cc:dd:ee:ff"}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert config_entry.data[CONF_HOST] == "192.0.2.20"

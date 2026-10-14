@@ -40,7 +40,7 @@ from .const import (
 )
 from .coordinator import PitbossDataUpdateCoordinator
 from .entity import PitbossEntity
-from .pitboss_api import PitbossApi
+from .pitboss_api import PitbossApi, describe_errors
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -66,6 +66,7 @@ SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
         state_key="P1ActTemp",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
+        available_fn=lambda api: int(api.get_state_value("P1ActTemp")) > 0,
     ),
     PitbossSensorEntityDescription(
         key="p2_act_temp",
@@ -73,11 +74,13 @@ SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
         state_key="P2ActTemp",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
+        available_fn=lambda api: int(api.get_state_value("P2ActTemp")) > 0,
     ),
     PitbossSensorEntityDescription(
         key="error_details",
         translation_key="error_details",
-        state_key="ErrorStr",
+        value_fn=lambda api: describe_errors(api.get_state_value("ErrorStr"))
+        or "No errors",
         entity_category=EntityCategory.DIAGNOSTIC,
         icon="mdi:alert",
     ),
@@ -88,7 +91,10 @@ SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:timer-outline",
+        device_class=SensorDeviceClass.DURATION,
         native_unit_of_measurement=UnitOfTime.SECONDS,
+        suggested_unit_of_measurement=UnitOfTime.HOURS,
+        suggested_display_precision=1,
     ),
     PitbossSensorEntityDescription(
         key=INFO_RAM_SIZE,
@@ -97,7 +103,10 @@ SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:memory",
+        device_class=SensorDeviceClass.DATA_SIZE,
         native_unit_of_measurement=UnitOfInformation.BYTES,
+        suggested_unit_of_measurement=UnitOfInformation.KIBIBYTES,
+        suggested_display_precision=0,
     ),
     PitbossSensorEntityDescription(
         key=INFO_RAM_FREE,
@@ -106,7 +115,10 @@ SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:memory-arrow-down",
+        device_class=SensorDeviceClass.DATA_SIZE,
         native_unit_of_measurement=UnitOfInformation.BYTES,
+        suggested_unit_of_measurement=UnitOfInformation.KIBIBYTES,
+        suggested_display_precision=0,
     ),
     PitbossSensorEntityDescription(
         key=INFO_RAM_MIN_FREE,
@@ -115,7 +127,10 @@ SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:memory-arrow-down",
+        device_class=SensorDeviceClass.DATA_SIZE,
         native_unit_of_measurement=UnitOfInformation.BYTES,
+        suggested_unit_of_measurement=UnitOfInformation.KIBIBYTES,
+        suggested_display_precision=0,
     ),
     PitbossSensorEntityDescription(
         key=INFO_FW_VERSION,
@@ -156,7 +171,10 @@ SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:harddisk",
+        device_class=SensorDeviceClass.DATA_SIZE,
         native_unit_of_measurement=UnitOfInformation.BYTES,
+        suggested_unit_of_measurement=UnitOfInformation.KIBIBYTES,
+        suggested_display_precision=0,
     ),
     PitbossSensorEntityDescription(
         key=INFO_FS_FREE,
@@ -165,7 +183,10 @@ SENSOR_TYPES: tuple[PitbossSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         icon="mdi:harddisk-plus",
+        device_class=SensorDeviceClass.DATA_SIZE,
         native_unit_of_measurement=UnitOfInformation.BYTES,
+        suggested_unit_of_measurement=UnitOfInformation.KIBIBYTES,
+        suggested_display_precision=0,
     ),
     PitbossSensorEntityDescription(
         key=INFO_WIFI_STA_IP,
@@ -236,6 +257,8 @@ async def async_setup_entry(
             PitbossTimeSinceTargetReachedSensor(
                 coordinator, device_id, "P2ActTemp", "P2SetTemp"
             ),
+            PitbossProbeEtaSensor(coordinator, device_id, "P1ActTemp", "P1SetTemp"),
+            PitbossProbeEtaSensor(coordinator, device_id, "P2ActTemp", "P2SetTemp"),
             PitbossLastSuccessfulUpdateSensor(coordinator, device_id),
         ]
     )
@@ -599,3 +622,48 @@ class PitbossTimeSinceTargetReachedSensor(PitbossEntity, SensorEntity):
         ) is None:
             return None
         return round(elapsed.total_seconds() / 60, 1)
+
+
+class PitbossProbeEtaSensor(PitbossEntity, SensorEntity):
+    """Estimated time a probe will reach its target temperature."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:timer-sand"
+    _translation_keys = {
+        "P1ActTemp": "p1_eta",
+        "P2ActTemp": "p2_eta",
+    }
+
+    def __init__(
+        self,
+        coordinator: PitbossDataUpdateCoordinator,
+        device_id: str,
+        actual_key: str,
+        target_key: str,
+    ) -> None:
+        """Initialize the probe ETA sensor."""
+        self._actual_key = actual_key
+        self._target_key = target_key
+        super().__init__(
+            coordinator,
+            device_id,
+            SensorEntityDescription(
+                key=self._translation_keys[actual_key],
+                translation_key=self._translation_keys[actual_key],
+            ),
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return True while the probe is plugged in and has a target."""
+        return (
+            super().available
+            and int(self._api.get_state_value(self._actual_key)) > 0
+            and self.coordinator.get_probe_target_temperature(self._target_key)
+            is not None
+        )
+
+    @property
+    def native_value(self) -> datetime | None:
+        """Return the estimated done time, or None while it can't be estimated."""
+        return self.coordinator.get_probe_eta(self._actual_key, self._target_key)
