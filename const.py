@@ -40,6 +40,11 @@ DONE_CONFIRMATION_WINDOW = timedelta(minutes=5)
 ETA_MAXIMUM = timedelta(hours=24)
 ETA_MINIMUM_HISTORY = timedelta(minutes=10)
 EVENT_PITBOSS = "pitboss_event"
+# A done probe must fall this far below target before "done" can fire again.
+EVENT_DONE_RESET_MARGIN_C = 3
+EVENT_DONE_RESET_MARGIN_F = 5
+# A stall must start (or end) and stay that way this long before it's announced.
+EVENT_STALL_HOLD = timedelta(minutes=5)
 GRILL_ALERT_DURATION = timedelta(minutes=10)
 GRILL_ALERT_THRESHOLD_C = 15
 GRILL_ALERT_THRESHOLD_F = 25

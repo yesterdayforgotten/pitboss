@@ -1,0 +1,79 @@
+name: Release
+
+# Run from the Actions tab: pick how to bump the version. The workflow runs the
+# tests, bumps manifest.json, commits and tags the bump on main, and publishes
+# a GitHub release. HACS offers the release to users as an update.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: minor
+      version:
+        description: Exact version instead (for example 1.0.0); overrides the bump
+        required: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  release:
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Work out the new version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXACT: ${{ inputs.version }}
+        run: |
+          current=$(jq -r .version manifest.json)
+          if [ -n "$EXACT" ]; then
+            next="${EXACT#v}"
+          else
+            IFS=. read -r major minor patch <<< "$current"
+            case "$BUMP" in
+              major) next="$((major + 1)).0.0" ;;
+              minor) next="$major.$((minor + 1)).0" ;;
+              patch) next="$major.$minor.$((patch + 1))" ;;
+            esac
+          fi
+          if ! [[ "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$next' is not a MAJOR.MINOR.PATCH version"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$next" >/dev/null; then
+            echo "::error::Tag v$next already exists"; exit 1
+          fi
+          echo "Releasing $current -> $next"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Bump manifest.json, commit and tag
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          jq --indent 2 --arg v "$NEXT" '.version = $v' manifest.json > manifest.tmp
+          mv manifest.tmp manifest.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release v$NEXT"
+          git tag "v$NEXT"
+          git push origin main "v$NEXT"
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: gh release create "v$NEXT" --title "v$NEXT" --generate-notes --verify-tag

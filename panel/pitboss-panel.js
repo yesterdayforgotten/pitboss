@@ -35,6 +35,8 @@ const STALL_RATE_THRESHOLD = 2;
 const STALL_MINIMUM_TEMPERATURE_F = 140;
 const STALL_MINIMUM_TEMPERATURE_C = 60;
 const COMPARE_DASH = "2 5";
+const LIVE_RETRY_MIN_MS = 5000;
+const LIVE_RETRY_MAX_MS = 60000;
 const COMPARE_MATCH_MINUTES = 6;
 
 // Free-text cook details; limits match COOK_ANNOTATION_TEXT_FIELDS in const.py.
@@ -1043,6 +1045,9 @@ class PitbossCookPanel extends HTMLElement {
     this._hoverIndex = null;
     this._chartWidth = 0;
     this._liveUnsub = null;
+    this._liveRetryTimer = null;
+    this._liveRetryDelay = LIVE_RETRY_MIN_MS;
+    this._carriedDraft = null;
     this._compareRequestId = 0;
     this._mediaQuery = window.matchMedia(COMPACT_MEDIA_QUERY);
     this._onMediaChange = () => this._render();
@@ -1162,25 +1167,71 @@ class PitbossCookPanel extends HTMLElement {
     ) {
       return;
     }
-    this._liveUnsub = this._hass.connection
+    const subscription = this._hass.connection
       .subscribeMessage((snapshot) => this._onLiveSnapshot(snapshot), {
         type: "pitboss/subscribe_live",
         config_entry_id: this._configEntryId,
       })
-      // Without live updates the panel still works as an archive.
-      .catch(() => null);
+      .then((unsubscribe) => {
+        this._liveRetryDelay = LIVE_RETRY_MIN_MS;
+        return unsubscribe;
+      })
+      .catch(() => {
+        // Not loaded yet (or mid-reload). The archive still works; keep trying.
+        if (this._liveUnsub === subscription) {
+          this._liveUnsub = null;
+          this._scheduleLiveRetry();
+        }
+        return null;
+      });
+    this._liveUnsub = subscription;
+  }
+
+  _scheduleLiveRetry() {
+    if (this._liveRetryTimer || !this.isConnected) {
+      return;
+    }
+    const delay = this._liveRetryDelay;
+    this._liveRetryDelay = Math.min(delay * 2, LIVE_RETRY_MAX_MS);
+    this._liveRetryTimer = setTimeout(() => {
+      this._liveRetryTimer = null;
+      this._subscribeLive();
+    }, delay);
   }
 
   _unsubscribeLive() {
+    clearTimeout(this._liveRetryTimer);
+    this._liveRetryTimer = null;
     const pending = this._liveUnsub;
     this._liveUnsub = null;
     pending?.then((unsubscribe) => unsubscribe?.()).catch(() => {});
   }
 
   _onLiveSnapshot(snapshot) {
+    if (snapshot?.unloaded) {
+      // The integration is reloading; the server already ended this
+      // subscription. Show the smoker as offline until the new one starts.
+      this._liveUnsub = null;
+      if (this._state.live) {
+        this._state = { ...this._state, live: { ...this._state.live, online: false } };
+        this._render();
+      }
+      this._scheduleLiveRetry();
+      return;
+    }
     const previousCook = this._liveCook;
     const nextCook = snapshot?.cook ?? null;
     const wasLiveSelected = this._isLiveSelected();
+    if (wasLiveSelected && previousCook.id !== nextCook?.id && this._isDirty()) {
+      // Keep unsaved edits when the finished cook reopens from the archive.
+      this._carriedDraft = {
+        cookId: previousCook.id,
+        draftTags: this._state.draftTags,
+        draftNotes: this._state.draftNotes,
+        draftDetails: this._state.draftDetails,
+        tagInput: this._state.tagInput,
+      };
+    }
     this._state = { ...this._state, live: snapshot };
 
     if (previousCook && previousCook.id !== nextCook?.id) {
@@ -1328,10 +1379,14 @@ class PitbossCookPanel extends HTMLElement {
       if (requestId !== this._cookLoadRequestId) {
         return;
       }
+      const carried = this._carriedDraft;
+      this._carriedDraft = null;
+      const { cookId: carriedCookId, ...carriedDraft } = carried ?? {};
       this._patchState({
         selectedCook: result.cook,
         loadingCook: false,
         ...this._draftFromCook(result.cook),
+        ...(carriedCookId === cookId ? carriedDraft : {}),
       });
     } catch (err) {
       if (requestId !== this._cookLoadRequestId) {

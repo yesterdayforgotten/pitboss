@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  # The tests use Home Assistant core's own test helpers, so they run inside a
+  # core checkout. Bump this together with the Python version it requires.
+  HA_VERSION: "2026.10.1"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the integration
+        uses: actions/checkout@v4
+        with:
+          path: pitboss
+
+      - name: Check out Home Assistant core
+        uses: actions/checkout@v4
+        with:
+          repository: home-assistant/core
+          ref: ${{ env.HA_VERSION }}
+          path: core
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: core/requirements_test.txt
+
+      - name: Install Home Assistant and test requirements
+        working-directory: core
+        run: |
+          uv venv .venv
+          # Packages core's test helpers import, plus what the frontend and
+          # panel_custom dependencies need to set up.
+          extras=$(grep -h -E '^(paho-mqtt|aiohasupervisor|home-assistant-frontend|home-assistant-intents|hassil|pymicro-vad|pyspeex-noise|mutagen|av|numpy|PyTurboJPEG|ha-ffmpeg|zeroconf|ifaddr)==' \
+            requirements_all.txt homeassistant/package_constraints.txt | sort -u)
+          uv pip install --python .venv/bin/python -e . -r requirements_test.txt $extras
+          .venv/bin/python -m script.translations develop --all
+
+      - name: Link the integration into the core test tree
+        run: |
+          ln -s "$GITHUB_WORKSPACE/pitboss" core/tests/testing_config/custom_components/pitboss
+          mkdir core/tests/components/pitboss_custom
+          touch core/tests/components/pitboss_custom/__init__.py
+          ln -s "$GITHUB_WORKSPACE"/pitboss/tests/test_*.py core/tests/components/pitboss_custom/
+
+      - name: Run tests
+        working-directory: core
+        env:
+          PYTHONPATH: tests/testing_config
+        run: .venv/bin/python -m pytest tests/components/pitboss_custom -p no:cacheprovider --timeout=60 -q

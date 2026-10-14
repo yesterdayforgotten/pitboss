@@ -876,6 +876,7 @@ async def test_probe_done_event_fires_once(
 
     events = async_capture_events(hass, EVENT_PITBOSS)
     start = utcnow()
+    coordinator._update_notifications(start)  # first poll only records state
     coordinator.api._state["P1SetTemp"] = 200
     _record_probe1_history(
         coordinator,
@@ -905,6 +906,7 @@ async def test_error_event_fires_for_each_new_error(
 
     events = async_capture_events(hass, EVENT_PITBOSS)
     start = utcnow()
+    coordinator._update_notifications(start - timedelta(minutes=1))
     coordinator.api._state["Error"] = True
     coordinator.api._state["ErrorStr"] = "NoPellets"
     coordinator._update_notifications(start)
@@ -1057,3 +1059,84 @@ def test_live_snapshot_reports_readings_and_active_cook(
     assert snapshot["cook"]["id"] == start.isoformat()
     assert snapshot["cook"]["confirmed"] is False
     assert len(snapshot["cook"]["samples"]) == 1
+
+
+async def test_probe_done_event_latches_until_probe_drops_well_below_target(
+    hass: HomeAssistant,
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """Wobbling around target during a rest must not re-announce done."""
+
+    events = async_capture_events(hass, EVENT_PITBOSS)
+    start = utcnow()
+    coordinator._update_notifications(start)
+    coordinator.api._state["P1SetTemp"] = 200
+
+    readings = [201, 202, 199, 201, 202, 203, 201]
+    for minute, temperature in enumerate(readings):
+        _record_probe1_history(
+            coordinator, start, [(timedelta(minutes=minute * 5), temperature)]
+        )
+        coordinator._update_notifications(start + timedelta(minutes=minute * 5))
+    await hass.async_block_till_done()
+    assert [event.data["type"] for event in events] == ["probe_done"]
+
+    # Pulled and re-probed (well below target): the next done is announced.
+    later = start + timedelta(hours=1)
+    _record_probe1_history(coordinator, later, [(timedelta(0), 150)])
+    coordinator._update_notifications(later)
+    _record_probe1_history(
+        coordinator,
+        later,
+        [(timedelta(minutes=30), 200), (timedelta(minutes=35), 201)],
+    )
+    coordinator._update_notifications(later + timedelta(minutes=35))
+    await hass.async_block_till_done()
+    assert [event.data["type"] for event in events] == ["probe_done", "probe_done"]
+
+
+async def test_stall_events_need_the_change_to_hold(
+    hass: HomeAssistant,
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """A stall flag flickering at the threshold is not announced."""
+
+    events = async_capture_events(hass, EVENT_PITBOSS)
+    start = utcnow()
+    stalled = {"value": False}
+    coordinator.is_probe_stalled = lambda key: key == "P1ActTemp" and stalled["value"]
+    coordinator._update_notifications(start)
+
+    stalled["value"] = True
+    coordinator._update_notifications(start + timedelta(minutes=1))
+    stalled["value"] = False
+    coordinator._update_notifications(start + timedelta(minutes=2))
+    stalled["value"] = True
+    coordinator._update_notifications(start + timedelta(minutes=3))
+    coordinator._update_notifications(start + timedelta(minutes=7))
+    await hass.async_block_till_done()
+    assert events == []
+
+    coordinator._update_notifications(start + timedelta(minutes=8))
+    await hass.async_block_till_done()
+    assert [(event.data["type"], event.data["probe"]) for event in events] == [
+        ("stall_started", 1)
+    ]
+
+
+async def test_first_poll_after_start_is_silent(
+    hass: HomeAssistant,
+    coordinator: PitbossDataUpdateCoordinator,
+) -> None:
+    """A restart must not re-announce an error that is already showing."""
+
+    events = async_capture_events(hass, EVENT_PITBOSS)
+    start = utcnow()
+    coordinator.api._state["Error"] = True
+    coordinator.api._state["ErrorStr"] = "NoPellets"
+
+    coordinator._update_notifications(start)
+    coordinator._update_notifications(start + timedelta(minutes=1))
+    await hass.async_block_till_done()
+
+    assert events == []

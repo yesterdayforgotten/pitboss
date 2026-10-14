@@ -36,7 +36,10 @@ from .const import (
     DONE_CONFIRMATION_WINDOW,
     ETA_MAXIMUM,
     ETA_MINIMUM_HISTORY,
+    EVENT_DONE_RESET_MARGIN_C,
+    EVENT_DONE_RESET_MARGIN_F,
     EVENT_PITBOSS,
+    EVENT_STALL_HOLD,
     GRILL_ALERT_DURATION,
     GRILL_ALERT_THRESHOLD_C,
     GRILL_ALERT_THRESHOLD_F,
@@ -217,9 +220,22 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         self._active_device_error_message: str | None = None
         self._last_update_error_message: str | None = None
         # Edge-detection state for pitboss_event notifications.
-        self._probe_done_notified = {"P1ActTemp": False, "P2ActTemp": False}
+        # The first poll after start only records state, so a restart doesn't
+        # re-announce a probe that is already done or an error already showing.
+        self._notifications_primed = False
+        # Target a "done" was announced for; latched until the target changes,
+        # the probe is unplugged or it drops well below target.
+        self._probe_done_notified: dict[str, int | None] = {
+            "P1ActTemp": None,
+            "P2ActTemp": None,
+        }
         self._probe_stall_notified = {"P1ActTemp": False, "P2ActTemp": False}
+        self._probe_stall_pending: dict[str, datetime | None] = {
+            "P1ActTemp": None,
+            "P2ActTemp": None,
+        }
         self._notified_error_codes: list[str] = []
+        self._probe1_done_restored = False
         # Smoker temperature alert: only armed once the smoker reaches its setpoint.
         self._grill_alert_setpoint: int | None = None
         self._grill_reached_setpoint = False
@@ -874,37 +890,67 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
     def _update_notifications(self, timestamp: datetime) -> None:
         """Fire events when probes finish or stall, errors appear, or the fire drifts."""
 
+        primed = self._notifications_primed
+        self._notifications_primed = True
+        reset_margin = (
+            EVENT_DONE_RESET_MARGIN_F
+            if self.api.is_fahrenheit()
+            else EVENT_DONE_RESET_MARGIN_C
+        )
+
         for probe, actual_key, target_key in (
             (1, "P1ActTemp", "P1SetTemp"),
             (2, "P2ActTemp", "P2SetTemp"),
         ):
-            done = self.is_probe_done(actual_key, target_key)
-            if done and not self._probe_done_notified[actual_key]:
-                self._fire_event(
-                    "probe_done",
-                    probe=probe,
-                    temperature=int(self.api.get_state_value(actual_key)),
-                    target=self.get_probe_target_temperature(target_key),
-                )
-            self._probe_done_notified[actual_key] = done
+            actual = int(self.api.get_state_value(actual_key))
+            target = self.get_probe_target_temperature(target_key)
+            if (
+                not primed
+                and actual_key == "P1ActTemp"
+                and self._probe1_done_restored
+            ):
+                self._probe_done_notified[actual_key] = target
+            announced_target = self._probe_done_notified[actual_key]
+            if announced_target is not None and (
+                target != announced_target
+                or actual <= 0
+                or actual < announced_target - reset_margin
+            ):
+                announced_target = self._probe_done_notified[actual_key] = None
+            if announced_target is None and self.is_probe_done(actual_key, target_key):
+                self._probe_done_notified[actual_key] = target
+                if primed:
+                    self._fire_event(
+                        "probe_done", probe=probe, temperature=actual, target=target
+                    )
 
+            # The trend wobbles around the stall threshold, so only announce a
+            # change that has held for a while.
             stalled = self.is_probe_stalled(actual_key)
-            if stalled != self._probe_stall_notified[actual_key]:
+            if not primed or stalled == self._probe_stall_notified[actual_key]:
+                self._probe_stall_notified[actual_key] = stalled
+                self._probe_stall_pending[actual_key] = None
+            elif (pending := self._probe_stall_pending[actual_key]) is None:
+                self._probe_stall_pending[actual_key] = timestamp
+            elif timestamp - pending >= EVENT_STALL_HOLD:
+                self._probe_stall_notified[actual_key] = stalled
+                self._probe_stall_pending[actual_key] = None
                 self._fire_event(
                     "stall_started" if stalled else "stall_ended",
                     probe=probe,
-                    temperature=int(self.api.get_state_value(actual_key)),
+                    temperature=actual,
                 )
-            self._probe_stall_notified[actual_key] = stalled
 
         codes = (
             error_codes(self.api.get_state_value("ErrorStr"))
             if self.api.get_state_value("Error")
             else []
         )
-        if new_codes := [
-            code for code in codes if code not in self._notified_error_codes
-        ]:
+        if primed and (
+            new_codes := [
+                code for code in codes if code not in self._notified_error_codes
+            ]
+        ):
             self._fire_event(
                 "error",
                 codes=new_codes,
@@ -1132,10 +1178,16 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
     def _schedule_cook_detail_save(self, active_cook: CookSession) -> None:
         """Persist sampled detail data for a completed cook."""
 
-        self._pending_detail_saves[active_cook["id"]] = active_cook
-        detail_store = self._get_cook_detail_store(active_cook["id"])
-        detail_store.async_delay_save(
-            lambda: self._serialize_cook_detail(active_cook), COOK_STORAGE_SAVE_DELAY
+        cook_id = active_cook["id"]
+        self._pending_detail_saves[cook_id] = active_cook
+
+        def _data_to_save() -> CookDetail:
+            # Written now, so unload has nothing left to flush for this cook.
+            self._pending_detail_saves.pop(cook_id, None)
+            return self._serialize_cook_detail(active_cook)
+
+        self._get_cook_detail_store(cook_id).async_delay_save(
+            _data_to_save, COOK_STORAGE_SAVE_DELAY
         )
 
     def _serialize_cook_detail(self, active_cook: CookSession) -> CookDetail:
@@ -1240,11 +1292,10 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
                     )
 
         self._previous_probe1_stall = bool(samples[-1].get("probe1_stalled"))
-        # Don't re-announce a stall or a finished probe after a restart.
-        self._probe_stall_notified["P1ActTemp"] = self._previous_probe1_stall
-        self._probe_done_notified["P1ActTemp"] = (
-            self._active_cook.get("done_at") is not None
-        )
+        # Done needs 5 minutes of fresh history, longer than the silent first
+        # poll covers, so carry probe 1's recorded done state across restarts.
+        # Before the first poll the target reads 0, so latch on the first one seen.
+        self._probe1_done_restored = self._active_cook.get("done_at") is not None
         self._active_device_error_message = None
         for error in reversed(self._active_cook.get("errors", [])):
             if error.get("source") == "device" and error.get("end") is None:

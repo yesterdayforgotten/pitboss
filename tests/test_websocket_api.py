@@ -473,3 +473,34 @@ async def test_subscribe_live_unknown_entry(
 
     assert not msg["success"]
     assert msg["error"]["code"] == websocket_api_const.ERR_NOT_FOUND
+
+
+async def test_subscribe_live_ends_when_the_entry_unloads(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """A reload must tell the panel to resubscribe to the new coordinator."""
+    config_entry, coordinator = _create_coordinator(hass)
+    async_setup_websocket_api(hass)
+
+    client = await hass_ws_client(hass)
+    await client.send_json(
+        {
+            "id": 11,
+            "type": "pitboss/subscribe_live",
+            "config_entry_id": config_entry.entry_id,
+        }
+    )
+    assert (await client.receive_json())["success"]
+    await client.receive_json()  # initial snapshot
+
+    for unload_callback in list(config_entry._on_unload or []):
+        if (result := unload_callback()) is not None:
+            await result
+
+    msg = await client.receive_json()
+    assert msg["event"] == {
+        "config_entry_id": config_entry.entry_id,
+        "unloaded": True,
+    }
+    assert coordinator._listeners == {}

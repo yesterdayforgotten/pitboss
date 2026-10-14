@@ -235,8 +235,23 @@ def ws_subscribe_live(
             websocket_api.event_message(msg["id"], coordinator.get_live_snapshot())
         )
 
-    connection.subscriptions[msg["id"]] = coordinator.async_add_listener(
-        _send_snapshot
-    )
+    unsubscribe = coordinator.async_add_listener(_send_snapshot)
+
+    @callback
+    def _entry_unloaded() -> None:
+        # A reload builds a new coordinator; tell the panel to subscribe again
+        # instead of leaving it attached to this one, which never updates.
+        if connection.subscriptions.get(msg["id"]) is not unsubscribe:
+            return
+        connection.subscriptions.pop(msg["id"])()
+        connection.send_message(
+            websocket_api.event_message(
+                msg["id"],
+                {"config_entry_id": msg["config_entry_id"], "unloaded": True},
+            )
+        )
+
+    coordinator.config_entry.async_on_unload(_entry_unloaded)
+    connection.subscriptions[msg["id"]] = unsubscribe
     connection.send_result(msg["id"])
     _send_snapshot()

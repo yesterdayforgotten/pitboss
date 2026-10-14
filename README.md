@@ -75,6 +75,8 @@ Everything the blueprint uses is available to your own automations as a `pitboss
 | `cook_started` | `cook_id`, `start` |
 | `cook_ended` | `cook_id`, `start`, `end`, `duration_minutes`, `title` |
 
+`probe_done` fires once per target: it won't repeat while the probe hovers around the target during a rest, only after the target changes or the probe drops 5°F / 3°C below it. Stall start and end are announced once the change has held for 5 minutes. The first poll after Home Assistant starts only records the current state, so a restart doesn't re-announce errors or finished probes.
+
 ```yaml
 triggers:
   - trigger: event
