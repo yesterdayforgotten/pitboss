@@ -2,15 +2,20 @@
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import PitbossConfigEntry
 from .entity import PitbossEntity
 from .pitboss_api import PitbossApi
+
+_LOGGER = logging.getLogger(__name__)
 
 type OptimisticState = dict[str, bool | int | float | str | None]
 
@@ -59,7 +64,19 @@ async def async_setup_entry(
     device_id = config_entry.unique_id or config_entry.entry_id
 
     async_add_entities(
-        PitbossSwitch(coordinator, device_id, description) for description in SWITCHES
+        [
+            *(
+                PitbossSwitch(coordinator, device_id, description)
+                for description in SWITCHES
+            ),
+            PitbossKeepSmokingSwitch(
+                coordinator,
+                device_id,
+                SwitchEntityDescription(
+                    key="keep_smoking", translation_key="keep_smoking"
+                ),
+            ),
+        ]
     )
 
 
@@ -107,3 +124,48 @@ class PitbossSwitch(PitbossEntity, SwitchEntity):
                 self.entity_description.optimistic_on_state
             )
             self.async_write_ha_state()
+
+
+class PitbossKeepSmokingSwitch(PitbossEntity, SwitchEntity):
+    """Keep the smoker at its setpoint when Probe 1 reaches its target.
+
+    The controller drops to keep-warm when the probe hits the target stored on
+    it, so while this is on the target is kept in Home Assistant and the
+    controller's copy is parked out of reach.
+    """
+
+    _attr_icon = "mdi:fire"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    @property
+    def available(self) -> bool:
+        """Stay editable while the smoker is offline; parking catches up on reconnect."""
+        return True
+
+    @property
+    def is_on(self) -> bool:
+        """Return True when the probe 1 target is kept in Home Assistant."""
+        return self.coordinator.keep_smoking
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Move the probe 1 target into Home Assistant and park the controller's."""
+        self.coordinator.enable_keep_smoking()
+        try:
+            await self._async_perform_api_command(
+                "park the smoker's probe 1 target",
+                self.coordinator.async_park_probe1_target,
+            )
+        except HomeAssistantError as ex:
+            # Still on; the next successful update parks it.
+            _LOGGER.warning("%s; retrying on the next update", ex)
+            return
+        self._handle_successful_command()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Hand the probe 1 target back to the controller."""
+        await self.coordinator.async_flush_debounced_commands()
+        await self._async_perform_api_command(
+            "restore the smoker's probe 1 target",
+            self.coordinator.async_disable_keep_smoking,
+        )
+        self._handle_successful_command()

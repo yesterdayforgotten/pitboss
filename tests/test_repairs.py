@@ -84,7 +84,7 @@ async def test_device_rename_creates_fixable_issue(
     assert issue.translation_placeholders == {
         "old_name": "Pit Boss",
         "new_name": "Porky",
-        "entity_count": "45",
+        "entity_count": "46",
     }
     assert issue.data is not None
     assert "binary_sensor.pit_boss_cook_active" in json.loads(
@@ -122,7 +122,7 @@ async def test_initial_name_prompt_after_mac_title_creates_fixable_issue(
     assert issue.translation_placeholders == {
         "old_name": "AA:BB:CC:DD:EE:FF",
         "new_name": "Porky",
-        "entity_count": "45",
+        "entity_count": "46",
     }
     assert issue.data is not None
     assert "binary_sensor.aa_bb_cc_dd_ee_ff_cook_active" in json.loads(
@@ -235,7 +235,7 @@ async def test_second_device_rename_keeps_original_source_ids(
     assert updated_issue.translation_placeholders == {
         "old_name": "Pit Boss",
         "new_name": "Brisket Boss",
-        "entity_count": "45",
+        "entity_count": "46",
     }
     assert updated_issue.data is not None
     assert updated_issue.data["old_name"] == "Pit Boss"
@@ -277,7 +277,7 @@ async def test_rename_still_finds_default_named_entities_after_missed_issue(
     assert updated_issue.translation_placeholders == {
         "old_name": "Porky",
         "new_name": "Porky2",
-        "entity_count": "45",
+        "entity_count": "46",
     }
     assert updated_issue.data is not None
     assert "binary_sensor.pit_boss_cook_active" in json.loads(
@@ -387,5 +387,5 @@ async def test_device_rename_fix_flow_ignore_only_applies_to_current_rename(
     assert next_issue.translation_placeholders == {
         "old_name": "Porky",
         "new_name": "Brisket Boss",
-        "entity_count": "45",
+        "entity_count": "46",
     }

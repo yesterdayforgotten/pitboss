@@ -11,7 +11,7 @@ from typing import Any
 from aiohttp import ClientError
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.const import CONF_SCAN_INTERVAL, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_call_later
@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 from homeassistant.util.dt import utcnow
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .const import (
     COOK_ANNOTATION_TEXT_FIELDS,
@@ -44,6 +45,7 @@ from .const import (
     GRILL_ALERT_THRESHOLD_C,
     GRILL_ALERT_THRESHOLD_F,
     INFO_MAC,
+    PROBE1_PARKED_TARGET_F,
     STALL_CONFIRMATION_WINDOW,
     STALL_MINIMUM_TEMPERATURE_C,
     STALL_MINIMUM_TEMPERATURE_F,
@@ -208,7 +210,13 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
             "P1ActTemp": deque(),
             "P2ActTemp": deque(),
         }
-        self._virtual_probe_targets: dict[str, int | None] = {"P2SetTemp": None}
+        self._virtual_probe_targets: dict[str, int | None] = {
+            "P1SetTemp": None,
+            "P2SetTemp": None,
+        }
+        # When on, the probe 1 target lives in Home Assistant and the
+        # controller's copy is parked out of reach.
+        self._keep_smoking = False
         self._probe_target_reached_at: dict[str, datetime | None] = {
             "P1SetTemp": None,
             "P2SetTemp": None,
@@ -248,6 +256,8 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         if (stored_data := await self._store.async_load()) is None:
             return
 
+        self._keep_smoking = bool(stored_data.get("keep_smoking", False))
+        self._virtual_probe_targets["P1SetTemp"] = stored_data.get("probe1_target")
         self._cook_sessions = [
             self._deserialize_cook_session(session)
             for session in stored_data.get("sessions", [])
@@ -266,6 +276,8 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         try:
             await self.api.update_device_info()
             await self.api.update_state()
+            if self._keep_smoking:
+                await self._async_sync_parked_probe1_target()
             self._last_update_error_message = None
             now = utcnow()
             self._record_temperature_history(now)
@@ -400,6 +412,96 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         self.async_update_listeners()
         self._schedule_store_save()
 
+    @property
+    def keep_smoking(self) -> bool:
+        """Return True when the probe 1 target is kept in Home Assistant."""
+
+        return self._keep_smoking
+
+    def probe1_parked_target(self) -> int:
+        """Return the out-of-reach probe 1 target in the smoker's unit."""
+
+        if self.api.is_fahrenheit():
+            return PROBE1_PARKED_TARGET_F
+        return int(
+            TemperatureConverter.convert(
+                PROBE1_PARKED_TARGET_F,
+                UnitOfTemperature.FAHRENHEIT,
+                UnitOfTemperature.CELSIUS,
+            )
+        )
+
+    def _is_parked(self, value: int) -> bool:
+        """Return True if a controller probe 1 target is the parked value."""
+
+        # Allow a degree of slack for rounding after a unit switch.
+        return value >= self.probe1_parked_target() - 1
+
+    def enable_keep_smoking(self) -> None:
+        """Move the probe 1 target into Home Assistant.
+
+        The controller's current target is adopted so nothing is lost; the
+        caller then parks the controller's copy.
+        """
+
+        if self._keep_smoking:
+            return
+        self.async_cancel_debounced_command("probe1_set_temp")
+        device_target = int(self.api.get_state_value("P1SetTemp"))
+        if device_target > 0 and not self._is_parked(device_target):
+            self._virtual_probe_targets["P1SetTemp"] = device_target
+        self._keep_smoking = True
+        self.update_probe_target_reached_times()
+
+    async def async_park_probe1_target(self) -> None:
+        """Send the parked probe 1 target. Call under the command lock."""
+
+        if not self._keep_smoking:
+            return
+        parked = self.probe1_parked_target()
+        await self.api.set_probe1_temp(parked)
+        self.api.apply_optimistic_state({"P1SetTemp": parked})
+
+    async def async_disable_keep_smoking(self) -> None:
+        """Hand the probe 1 target back to the controller. Call under the command lock.
+
+        The flag flips only after the controller accepts the target, and under
+        the same lock a poll would use to re-park, so the two can't race.
+        """
+
+        if not self._keep_smoking:
+            return
+        if (target := self._virtual_probe_targets["P1SetTemp"]) is not None:
+            await self.api.set_probe1_temp(target)
+            self.api.apply_optimistic_state({"P1SetTemp": target})
+        self._keep_smoking = False
+        self.update_probe_target_reached_times()
+
+    async def _async_sync_parked_probe1_target(self) -> None:
+        """Keep the controller's probe 1 target parked while keep smoking is on.
+
+        A target set from the Pit Boss app or the controller itself is adopted
+        as the new Home Assistant target before being parked again.
+        """
+
+        device_target = int(self.api.get_state_value("P1SetTemp"))
+        if device_target <= 0 or self._is_parked(device_target):
+            return
+        if device_target != self._virtual_probe_targets["P1SetTemp"]:
+            _LOGGER.info(
+                "Probe 1 target changed on the smoker to %s; keeping it in Home Assistant",
+                device_target,
+            )
+            self._virtual_probe_targets["P1SetTemp"] = device_target
+            self._schedule_store_save()
+        try:
+            await self.async_run_serialized_command(self.async_park_probe1_target)
+        except (ClientError, TimeoutError, ValueError) as ex:
+            _LOGGER.warning(
+                "Couldn't park the smoker's probe 1 target; retrying next update: %s",
+                ex,
+            )
+
     def update_probe_target_reached_times(self) -> None:
         """Recalculate target-reached tracking after an optimistic target change."""
 
@@ -410,7 +512,7 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
     def get_probe_target_temperature(self, key: str) -> int | None:
         """Return the target temperature for a probe, if one is set."""
 
-        if key == "P1SetTemp":
+        if key == "P1SetTemp" and not self._keep_smoking:
             value = int(self.api.get_state_value(key))
         else:
             value = self._virtual_probe_targets.get(key)
@@ -1368,6 +1470,8 @@ class PitbossDataUpdateCoordinator(TimestampDataUpdateCoordinator[None]):
         """Return cook session data for storage."""
 
         return {
+            "keep_smoking": self._keep_smoking,
+            "probe1_target": self._virtual_probe_targets["P1SetTemp"],
             "sessions": [
                 self._serialize_cook_session(session) for session in self._cook_sessions
             ],

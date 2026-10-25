@@ -78,10 +78,18 @@ class PitbossProbeTargetNumber(
     @property
     def native_value(self) -> float:
         """Return the current probe target temperature."""
+        if self.coordinator.keep_smoking:
+            return float(
+                self.coordinator.get_probe_target_temperature("P1SetTemp") or 0
+            )
         return float(self._api.get_state_value("P1SetTemp"))
 
     async def async_set_native_value(self, value: float) -> None:
         """Set a new probe target temperature."""
+        if self.coordinator.keep_smoking:
+            # The controller's copy stays parked; only Home Assistant knows it.
+            self.coordinator.set_virtual_probe_target("P1SetTemp", int(value))
+            return
         self._api.apply_optimistic_state({"P1SetTemp": int(value)})
         self.coordinator.update_probe_target_reached_times()
         await self._async_execute_api_command(

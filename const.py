@@ -55,6 +55,9 @@ STALL_TREND_THRESHOLD = 2.0
 TEMPERATURE_TREND_INTERVAL = timedelta(hours=1)
 TEMPERATURE_TREND_WINDOW = timedelta(minutes=30)
 TEMPERATURE_COMMAND_DEBOUNCE = 0.75
+# With "keep smoking" on, the controller's probe 1 target is parked here so it
+# never fires its own keep-warm drop; the real target lives in Home Assistant.
+PROBE1_PARKED_TARGET_F = 400
 UPDATE_INTERVAL = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
 
 # Free-text cook details editable from the archive panel, with length limits.

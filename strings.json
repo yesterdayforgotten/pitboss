@@ -221,6 +221,9 @@
     "switch": {
       "primer": {
         "name": "Primer"
+      },
+      "keep_smoking": {
+        "name": "Keep Smoking When Probe 1 Is Done"
       }
     },
     "number": {

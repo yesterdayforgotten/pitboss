@@ -36,9 +36,10 @@ Give the smoker a fixed IP (a DHCP reservation in your router) so it doesn't mov
 | Entity | What it does |
 | --- | --- |
 | Grill Control (climate) | Smoker on/off and setpoint. The smoker moves in 10°F steps. |
-| Probe 1 Target Temperature | Probe 1 target, stored on the smoker. |
+| Probe 1 Target Temperature | Probe 1 target, stored on the smoker (or in Home Assistant while Keep Smoking is on). |
 | Probe 2 Target Temperature | Probe 2 target. **The controller has no probe 2 target, so this one is stored only in Home Assistant**; the smoker's own display won't show it. |
 | Primer | Runs the auger to prime pellets. |
+| Keep Smoking When Probe 1 Is Done | The controller drops to keep-warm when Probe 1 reaches the target stored on it. When this is on, the Probe 1 target is kept in Home Assistant instead and the smoker's own probe target is set to 400°F so it never triggers; the smoker holds its setpoint and the Done alert, estimate and delta still use your real target. A target set from the Pit Boss app is picked up and moved over. Turning it off sends the target back to the smoker, which then drops to keep-warm right away if the probe is already past it. |
 | Probe 1/2 Temperature | Unavailable when the probe is unplugged. |
 | Probe 1/2 Estimated Done | When the probe should reach its target, based on the last 30 minutes of rise. Unknown during a stall, before there's 10 minutes of data, or if the estimate is over 24 hours. |
 | Probe 1/2 Delta to Target | Degrees left to go. |
