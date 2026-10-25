@@ -3,6 +3,7 @@
 from homeassistant.components.number import (
     NumberEntity,
     NumberEntityDescription,
+    NumberMode,
     RestoreNumber,
 )
 from homeassistant.const import EntityCategory, UnitOfTemperature
@@ -32,6 +33,8 @@ def _probe_target_limit_in_native_unit(is_fahrenheit: bool, value_f: int) -> flo
 
 class _PitbossTemperatureUnitMixin:
     """Shared temperature unit and bounds behavior for Pit Boss number entities."""
+
+    _attr_mode = NumberMode.BOX
 
     @property
     def _is_fahrenheit(self) -> bool:

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from homeassistant.core import HomeAssistant
-from homeassistant.components.number import NumberEntityDescription
+from homeassistant.components.number import NumberEntityDescription, NumberMode
 from homeassistant.util.dt import utcnow
 from homeassistant.util.unit_conversion import TemperatureConverter
 from homeassistant.const import UnitOfTemperature
@@ -192,6 +192,25 @@ async def test_probe_target_step_size_is_ten(
 
     assert probe1_entity.native_step == 10
     assert probe2_entity.native_step == 10
+
+
+async def test_probe_targets_use_box_input(
+    hass: HomeAssistant,
+) -> None:
+    """Probe target controls should be typed into a box, not dragged on a slider."""
+
+    coordinator, device_id = _create_coordinator(hass, is_fahrenheit=True)
+
+    for entity_class, key in (
+        (PitbossProbeTargetNumber, "probe1_target_temp"),
+        (PitbossVirtualProbeTargetNumber, "probe2_target_temp"),
+    ):
+        entity = entity_class(
+            coordinator,
+            device_id,
+            description=NumberEntityDescription(key=key, translation_key=key),
+        )
+        assert entity.mode == NumberMode.BOX
 
 
 async def test_probe2_target_number_has_editable_default_value(
